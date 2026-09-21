@@ -76,8 +76,12 @@ A command trigger has no `text`/`regex` of its own; instead it takes:
 The scanner behind `where: position` is conservative: what it does not
 understand matches nothing there (`where: anywhere` still does, since it
 never parses the line). This includes a here-document, a backtick, `$((`,
-`[[ … ]]`, `case … esac`, an array literal (`x=(…`, `x+=(…`), `$'…'`
-(ANSI-C quoting), and an unclosed quote. A `\` line continuation is not
+`[[ … ]]`, `case … esac`, an array literal (`x=(…`, `x+=(…`, and the same
+on `declare -a`/`local`/`export`), a function definition (`f() { … }`),
+`for ((…))`, `$'…'` (ANSI-C quoting), and an unclosed quote — in shell
+grammar, a `(` that is not itself at a place where a command could start is
+never a subshell, and the scanner treats it the same way: understood no
+further, at whatever point it is reached. A `\` line continuation is not
 understood either, in a weaker way: it does not make the whole trigger
 fail, but a pattern only ever sees the FIRST line — nothing past the `\`
 is there to match.

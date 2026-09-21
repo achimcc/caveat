@@ -268,8 +268,15 @@ mod tests {
 
     #[test]
     fn a_persisted_output_is_read_from_its_end_and_a_missing_one_is_no_error() {
-        // As recorded: the path does not exist here. The truncated stdout still matches.
+        // On the in-memory copy, point `persistedOutputPath` at a path
+        // that provably does not exist (a name never written inside a
+        // fresh tempdir) — not at whatever the recording happened to
+        // leave behind, which may or may not still be there depending on
+        // the machine. The truncated stdout still matches on its own.
         let mut large = event(POST_LARGE);
+        let missing_dir = tempfile::tempdir().unwrap();
+        large["tool_response"]["persistedOutputPath"] =
+            Value::String(missing_dir.path().join("gone.txt").display().to_string());
         assert!(respond(&probes(), &large, &mut Seen::memory()).is_some());
         // With the file in place, the END of the output is visible, which stdout lost.
         let tmp = tempfile::NamedTempFile::new().unwrap();

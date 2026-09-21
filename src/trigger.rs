@@ -98,10 +98,7 @@ mod tests {
         );
         assert!(!t.matches("ssh -F ssh_config vps uptime").unwrap());
         assert!(!t.matches("echo 'ssh root@203.0.113.7'").unwrap());
-        assert!(
-            !t.matches("git commit -m \"ssh root@203.0.113.7\"")
-                .unwrap()
-        );
+        assert!(!t.matches("git commit -m \"ssh root@203.0.113.7\"").unwrap());
     }
 
     #[test]

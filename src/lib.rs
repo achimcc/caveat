@@ -2,3 +2,4 @@
 
 pub mod entry;
 pub mod scan;
+pub mod trigger;

@@ -43,28 +43,30 @@ are free text, for a human reading the directory. An unknown key is an
 error — a typo must not silently be ignored.
 
 `output` triggers match what a call printed, `command` triggers match the
-command before it runs. Each needs exactly one of:
+command before it runs.
+
+An output trigger needs exactly one of:
 
 - `text` — a literal, case-sensitive substring. The default: this project
   has paid enough for patterns that looked right and matched the wrong
   line.
 - `regex` — a regular expression.
 
-A command trigger also takes:
+A command trigger has no `text`/`regex` of its own; instead it takes:
 
 - `program` — matches only at command position, behind `sudo`, `nice`,
   `exec`, `command`, `timeout …`, and `lotse run --class=… --`, and behind
-  a path (`/usr/bin/ssh` still matches `ssh`). Required unless `where:
-  anywhere`.
+  a path (`/usr/bin/ssh` still matches `ssh`).
 - `pattern` — a regex the matched command segment must also satisfy.
-  Optional together with `program`; required with `where: anywhere`.
 - `where: position` (the default) — only where the shell would actually run
   a command: not inside a quoted string, not after the command it follows
-  in a pipeline.
+  in a pipeline. Needs `program`; `pattern` is then optional on top of it.
 - `where: anywhere` — anywhere in the raw line, quoted or not. This is what
   sees the inner command of `ssh host '…'` or `bash -c '…'`, which `where:
   position` cannot: it has no program of its own to match, and even
-  `pattern` alone only ever looks at what the local shell would run.
+  `pattern` alone only ever looks at what the local shell would run. Needs
+  `pattern`; `program` is then forbidden, not merely unneeded — a command
+  trigger cannot combine a program name with a plain textual search.
 
 `hits` and `misses` are required on every trigger: one example the trigger
 must match, one it must not. They are never executed — `caveat check` only
@@ -91,7 +93,8 @@ goes unnoticed.
 - **`caveat search [--dir DIR] TEXT…`** — ranks caveats against `TEXT`:
   highest if a trigger matches it, then a title match, then a body match.
   Paste the error message itself; the triggers then work the right way
-  round. Exit `0` if it printed at least one, `1` if it found nothing.
+  round. Exit `0` if it printed at least one, `1` if it found nothing, `2`
+  on a tool error — no query given, or no `caveats` directory found.
 
 ## Installing the hook
 
@@ -154,7 +157,8 @@ documentation:
   practical way around this.
 - A caveat is shown at most once per session — and a subagent counts as its
   own session: it starts with a fresh context and has not read what its
-  parent was shown.
+  parent was shown. Kept in `$XDG_STATE_HOME/caveat/seen/`, one file per
+  session and agent, next to `hook.log`.
 - A reply carries at most 2 full caveats (title, path, body, cut at 6,000
   characters with a pointer to the file); a third and later match is named
   by title and path only.

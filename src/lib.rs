@@ -2,4 +2,5 @@
 
 pub mod entry;
 pub mod scan;
+pub mod store;
 pub mod trigger;

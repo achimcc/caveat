@@ -217,6 +217,31 @@ fn search_finds_by_a_pasted_message_and_exits_one_on_nothing() {
 }
 
 #[test]
+fn search_reports_a_broken_file_on_stderr() {
+    let tmp = repo();
+    let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));
+    let dir = tmp.path().join("repo/caveats");
+    let dir_arg = dir.to_str().unwrap();
+    std::fs::write(dir.join("broken.md"), "no frontmatter here").unwrap();
+    let found = run(
+        &["search", "--dir", dir_arg, "spike-erfolg"],
+        "",
+        &state,
+        &config,
+    );
+    assert_eq!(found.status.code(), Some(0));
+    let err = String::from_utf8_lossy(&found.stderr);
+    assert!(
+        err.contains("broken.md"),
+        "stderr should name the broken file: {err:?}"
+    );
+    assert!(
+        err.starts_with("caveat: "),
+        "stderr should follow `caveat: <path>: <error>`: {err:?}"
+    );
+}
+
+#[test]
 fn an_unknown_command_is_usage_and_exit_two() {
     let tmp = repo();
     let out = run(

@@ -102,7 +102,10 @@ fn run_check(dir: Option<PathBuf>) -> Result<ExitCode> {
 }
 
 fn run_search(dir: Option<PathBuf>, query: &str) -> Result<ExitCode> {
-    let (entries, _) = store::load(&dir_or_found(dir)?)?;
+    let (entries, broken) = store::load(&dir_or_found(dir)?)?;
+    for (path, error) in &broken {
+        eprintln!("caveat: {}: {error:#}", path.display());
+    }
     let found = search::search(&entries, query);
     for e in &found {
         println!("{}\n  {}\n  {}", e.title, e.path.display(), e.line);

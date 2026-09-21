@@ -11,7 +11,12 @@ const USAGE: &str =
     "usage: caveat hook claude | caveat check [--dir DIR] | caveat search [--dir DIR] TEXT…";
 
 fn log(line: &str) {
-    let dir = store::state_dir();
+    // Neither `XDG_STATE_HOME` nor `HOME` gives an absolute path: there is
+    // nowhere safe to write, and staying quiet beats creating
+    // `.local/state/caveat/` inside whatever directory this runs in.
+    let Some(dir) = store::state_dir() else {
+        return;
+    };
     let _ = std::fs::create_dir_all(&dir);
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -41,18 +46,23 @@ fn run_hook() -> Result<()> {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .context("no cwd")?;
-    let Some(dir) = store::find_dir(&cwd, &store::config_home()) else {
+    let Some(dir) = store::find_dir(&cwd, store::config_home().as_deref()) else {
         return Ok(());
     };
     let (entries, broken) = store::load(&dir)?;
     for (path, error) in &broken {
         log(&format!("broken {}: {error:#}", path.display()));
     }
-    let mut seen = Seen::open(
-        &store::state_dir(),
-        event["session_id"].as_str().unwrap_or("unknown"),
-        event["agent_id"].as_str(),
-    );
+    // No state dir → no `seen` file either: kept in memory only, so a
+    // caveat can still be shown, just not remembered across hook calls.
+    let mut seen = match store::state_dir() {
+        Some(dir) => Seen::open(
+            &dir,
+            event["session_id"].as_str().unwrap_or("unknown"),
+            event["agent_id"].as_str(),
+        ),
+        None => Seen::memory(),
+    };
     if let Some(reply) = hook::respond(&entries, &event, &mut seen) {
         let name = event["hook_event_name"].as_str().unwrap_or("?");
         for slug in &reply.slugs {
@@ -69,7 +79,7 @@ fn run_hook() -> Result<()> {
 fn dir_or_found(dir: Option<PathBuf>) -> Result<PathBuf> {
     match dir {
         Some(dir) => Ok(dir),
-        None => store::find_dir(&std::env::current_dir()?, &store::config_home())
+        None => store::find_dir(&std::env::current_dir()?, store::config_home().as_deref())
             .context("no `caveats` directory above here, and none in the config; use --dir"),
     }
 }

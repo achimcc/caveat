@@ -27,14 +27,10 @@ fn is_assignment(word: &str) -> bool {
 /// it only looks at what comes before the first `=`, and a bare `(` right
 /// after still opens a command position of its own further down.
 fn starts_array_assignment(word: &str) -> bool {
-    for sep in ["+=(", "=("] {
-        if let Some((name, _)) = word.split_once(sep) {
-            if is_identifier(name) {
-                return true;
-            }
-        }
-    }
-    false
+    ["+=(", "=("].iter().any(|sep| {
+        word.split_once(sep)
+            .is_some_and(|(name, _)| is_identifier(name))
+    })
 }
 
 /// The simple command that starts at `from`, cut at the first character that

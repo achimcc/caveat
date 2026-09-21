@@ -1,5 +1,6 @@
 //! Where the caveats are, and all of them.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
@@ -16,15 +17,16 @@ struct Config {
 }
 
 /// Upwards from `cwd`, like lotse looks for its `lotse.toml`: a worktree brings
-/// its own version. The config is the fallback for repositories without any.
-pub fn find_dir(cwd: &Path, config_home: &Path) -> Option<PathBuf> {
+/// its own version. The config is the fallback for repositories without any —
+/// `None` when there is no config home to look in (`config_home` gave none).
+pub fn find_dir(cwd: &Path, config_home: Option<&Path>) -> Option<PathBuf> {
     for dir in cwd.ancestors() {
         let candidate = dir.join(DIR);
         if candidate.is_dir() {
             return Some(candidate);
         }
     }
-    let raw = std::fs::read_to_string(config_home.join("caveat/config.toml")).ok()?;
+    let raw = std::fs::read_to_string(config_home?.join("caveat/config.toml")).ok()?;
     let config: Config = toml::from_str(&raw).ok()?;
     config.dir.is_dir().then_some(config.dir)
 }
@@ -54,21 +56,49 @@ pub fn load(dir: &Path) -> Result<(Vec<Entry>, Vec<(PathBuf, anyhow::Error)>)> {
     Ok((entries, broken))
 }
 
-fn home() -> PathBuf {
-    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+/// `var`, but only if it is non-empty and absolute. An `XDG_*` variable
+/// that is SET but EMPTY, or a relative one, must not silently produce a
+/// relative state or config path — the hook would then create
+/// `.local/state/caveat/` inside whatever directory it runs in.
+fn absolute_dir(var: Option<&OsStr>) -> Option<PathBuf> {
+    let var = var.filter(|v| !v.is_empty())?;
+    let path = PathBuf::from(var);
+    path.is_absolute().then_some(path)
 }
 
-pub fn config_home() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".config"))
+/// Pure: `XDG_CONFIG_HOME` if it gives an absolute path, else `$HOME/.config`
+/// if `HOME` gives one, else `None`. Takes both variables as arguments so a
+/// test does not have to mutate the process environment (tests run in
+/// parallel).
+fn config_home_from(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    absolute_dir(xdg_config_home).or_else(|| absolute_dir(home).map(|h| h.join(".config")))
 }
 
-pub fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home().join(".local/state"))
-        .join("caveat")
+/// Pure, same shape as `config_home_from`: `XDG_STATE_HOME/caveat` or
+/// `$HOME/.local/state/caveat`, or `None`.
+fn state_dir_from(xdg_state_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+    let base = absolute_dir(xdg_state_home)
+        .or_else(|| absolute_dir(home).map(|h| h.join(".local/state")))?;
+    Some(base.join("caveat"))
+}
+
+/// `None` when neither `XDG_CONFIG_HOME` nor `HOME` gives an absolute path:
+/// callers then have no fallback to look in (`find_dir` takes `Option`).
+pub fn config_home() -> Option<PathBuf> {
+    config_home_from(
+        std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
+}
+
+/// `None` when neither `XDG_STATE_HOME` nor `HOME` gives an absolute path:
+/// callers then keep no log and no per-session `seen` file
+/// (`Seen::memory()`, and `main::log` does nothing).
+pub fn state_dir() -> Option<PathBuf> {
+    state_dir_from(
+        std::env::var_os("XDG_STATE_HOME").as_deref(),
+        std::env::var_os("HOME").as_deref(),
+    )
 }
 
 #[cfg(test)]
@@ -83,8 +113,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         fs::create_dir_all(tmp.path().join("repo/caveats")).unwrap();
         fs::create_dir_all(tmp.path().join("repo/a/b")).unwrap();
-        let found = find_dir(&tmp.path().join("repo/a/b"), &tmp.path().join("cfg"));
+        let found = find_dir(&tmp.path().join("repo/a/b"), Some(&tmp.path().join("cfg")));
         assert_eq!(found, Some(tmp.path().join("repo/caveats")));
+    }
+
+    #[test]
+    fn no_config_home_is_no_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("other")).unwrap();
+        assert_eq!(find_dir(&tmp.path().join("other"), None), None);
     }
 
     #[test]
@@ -97,12 +134,12 @@ mod tests {
         let cfg = tmp.path().join("cfg/caveat/config.toml");
         fs::write(&cfg, format!("dir = \"{}\"\n", data.display())).unwrap();
         assert_eq!(
-            find_dir(&tmp.path().join("other"), &tmp.path().join("cfg")),
+            find_dir(&tmp.path().join("other"), Some(&tmp.path().join("cfg"))),
             Some(data)
         );
         fs::write(&cfg, "dir = \"/does/not/exist\"\n").unwrap();
         assert_eq!(
-            find_dir(&tmp.path().join("other"), &tmp.path().join("cfg")),
+            find_dir(&tmp.path().join("other"), Some(&tmp.path().join("cfg"))),
             None
         );
     }
@@ -133,5 +170,59 @@ mod tests {
         let slugs: Vec<&str> = entries.iter().map(|e| e.slug.as_str()).collect();
         assert_eq!(slugs, ["a"]);
         assert!(broken.is_empty());
+    }
+
+    #[test]
+    fn the_xdg_variable_wins_when_it_is_absolute() {
+        assert_eq!(
+            config_home_from(Some(OsStr::new("/xdg/cfg")), Some(OsStr::new("/home/x"))),
+            Some(PathBuf::from("/xdg/cfg"))
+        );
+        assert_eq!(
+            state_dir_from(Some(OsStr::new("/xdg/state")), Some(OsStr::new("/home/x"))),
+            Some(PathBuf::from("/xdg/state/caveat"))
+        );
+    }
+
+    #[test]
+    fn an_empty_xdg_variable_falls_back_to_home() {
+        assert_eq!(
+            config_home_from(Some(OsStr::new("")), Some(OsStr::new("/home/x"))),
+            Some(PathBuf::from("/home/x/.config"))
+        );
+        assert_eq!(
+            state_dir_from(Some(OsStr::new("")), Some(OsStr::new("/home/x"))),
+            Some(PathBuf::from("/home/x/.local/state/caveat"))
+        );
+    }
+
+    #[test]
+    fn a_missing_xdg_variable_falls_back_to_home_too() {
+        assert_eq!(
+            config_home_from(None, Some(OsStr::new("/home/x"))),
+            Some(PathBuf::from("/home/x/.config"))
+        );
+    }
+
+    #[test]
+    fn neither_the_xdg_variable_nor_home_gives_a_relative_path() {
+        // Empty XDG variable, no HOME at all: no fallback exists, so the
+        // result is None — never a relative path built from nothing.
+        assert_eq!(config_home_from(Some(OsStr::new("")), None), None);
+        assert_eq!(state_dir_from(Some(OsStr::new("")), None), None);
+        // Empty XDG variable, HOME set but relative: still no absolute
+        // fallback.
+        assert_eq!(
+            config_home_from(Some(OsStr::new("")), Some(OsStr::new("relative/home"))),
+            None
+        );
+        // XDG variable itself relative: not used as-is either.
+        assert_eq!(
+            state_dir_from(
+                Some(OsStr::new("relative/xdg")),
+                Some(OsStr::new("/home/x"))
+            ),
+            Some(PathBuf::from("/home/x/.local/state/caveat"))
+        );
     }
 }

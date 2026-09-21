@@ -86,6 +86,46 @@ fn the_hook_shows_the_caveat_once_and_logs_the_hit() {
 }
 
 #[test]
+fn empty_xdg_variables_and_no_home_create_no_relative_local_directory() {
+    let tmp = repo();
+    // A caveat that DOES fire, so the hook reaches `log()` and `Seen::open`
+    // — where a relative state path would show up as `.local/` created
+    // relative to the process's cwd, which we set to a fresh directory.
+    let cwd = tmp.path().join("cwd");
+    std::fs::create_dir_all(&cwd).unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_caveat"))
+        .args(["hook", "claude"])
+        .env("XDG_STATE_HOME", "")
+        .env("XDG_CONFIG_HOME", "")
+        .env_remove("HOME")
+        .current_dir(&cwd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(recorded(tmp.path()).as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    // Neither `.local/state/caveat` (the unset-variable shape) nor a bare
+    // `caveat/` (what `XDG_STATE_HOME=""` produces when an empty variable
+    // is treated as set) may appear relative to the process's cwd.
+    let created: Vec<_> = std::fs::read_dir(&cwd)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert!(
+        created.is_empty(),
+        "no directory should have been created relative to cwd, found: {created:?}"
+    );
+}
+
+#[test]
 fn a_closed_stdout_is_still_exit_zero() {
     let tmp = repo();
     let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));

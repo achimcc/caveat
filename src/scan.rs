@@ -137,6 +137,11 @@ pub fn commands(text: &str) -> Option<Vec<&str>> {
                         _ => i += 1,
                     }
                 }
+                // A trailing backslash walks past the end: a line this scanner does not
+                // understand, like lotse's.
+                if i > bytes.len() {
+                    return None;
+                }
             }
         }
     }
@@ -226,6 +231,8 @@ mod tests {
         assert!(commands("echo `ssh host`").is_none());
         assert!(commands("echo $((1+1))").is_none());
         assert!(commands("echo 'open").is_none());
+        assert!(commands("\\").is_none());
+        assert!(commands("echo \\").is_none());
     }
 
     #[test]

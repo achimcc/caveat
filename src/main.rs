@@ -53,7 +53,10 @@ fn run_hook() -> Result<()> {
         for slug in &reply.slugs {
             log(&format!("hit {name} {slug}"));
         }
-        println!("{}", reply.json);
+        // Not println!: it panics when stdout is gone (a closed pipe, a full disk),
+        // and a panic is exit 101 — the one thing this hook must never do.
+        let mut out = std::io::stdout().lock();
+        writeln!(out, "{}", reply.json).context("writing the reply")?;
     }
     Ok(())
 }

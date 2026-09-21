@@ -57,6 +57,36 @@ fn the_hook_shows_the_caveat_once_and_logs_the_hit() {
 }
 
 #[test]
+fn a_closed_stdout_is_still_exit_zero() {
+    let tmp = repo();
+    let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));
+    // Every write to /dev/full fails with ENOSPC: the disk-full case of the finding.
+    let full = std::fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_caveat"))
+        .args(["hook", "claude"])
+        .env("XDG_STATE_HOME", &state)
+        .env("XDG_CONFIG_HOME", &config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::from(full))
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(recorded(tmp.path()).as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let log = std::fs::read_to_string(state.join("caveat/hook.log")).unwrap();
+    assert!(log.contains("error"));
+}
+
+#[test]
 fn a_broken_stdin_is_silent_exits_zero_and_leaves_a_log_line() {
     let tmp = repo();
     let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));

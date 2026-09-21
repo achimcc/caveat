@@ -24,8 +24,15 @@ fn is_assignment(word: &str) -> bool {
 
 /// `NAME=(…` or `NAME+=(…`: an array literal or an append to one, not a
 /// subshell around a command. `is_assignment` alone does not catch this —
-/// it only looks at what comes before the first `=`, and a bare `(` right
-/// after still opens a command position of its own further down.
+/// it only looks at what comes before the first `=`. And unlike a plain
+/// word, this check stays needed even with the bare-`(` fix in `commands()`
+/// below: `is_assignment` recognises `NAME=(…` as an assignment and, by
+/// design (same as `FOO=1 ssh host`), does NOT clear `command_position` —
+/// so when the `(` right after it is reached, `command_position` is still
+/// `true` and the bare-`(` fix would let it through as a real subshell.
+/// (`declare -a x=(…` is different: there the array literal is not the
+/// FIRST word, so the array word is never examined for a push at all, and
+/// it is the bare-`(` fix that catches it, at the point of the `(` itself.)
 fn starts_array_assignment(word: &str) -> bool {
     ["+=(", "=("].iter().any(|sep| {
         word.split_once(sep)
@@ -91,6 +98,16 @@ pub fn commands(text: &str) -> Option<Vec<&str>> {
                 i += 1;
             }
             b'(' => {
+                // A bare `(` away from a command position is never a
+                // subshell in shell grammar: it is an array literal
+                // (`declare -a x=(…`), a function definition (`f() {`),
+                // a `[[ … =~ (…) ]]` group, a case pattern, an extglob, or
+                // `for ((…))`. Only a `(` AT a command position opens a
+                // subshell — command substitution (`$(`) is a separate
+                // branch and stays followed either way.
+                if !command_position {
+                    return None;
+                }
                 stack.push(Ctx::Paren);
                 command_position = true;
                 i += 1;
@@ -114,11 +131,20 @@ pub fn commands(text: &str) -> Option<Vec<&str>> {
                 if command_position {
                     let seg = segment(text, start);
                     let word = seg.split_whitespace().next().unwrap_or("");
-                    // `[[ … ]]` and `case … esac` are not command lists: a
-                    // `(` or a `&&` inside either still opens a command
-                    // position further down (the `(` dispatch below does not
-                    // know it is inside one), so skipping just this word is
-                    // not enough — the whole line is understood no further.
+                    // `[[ … ]]` and `case … esac` are not command lists;
+                    // skipping just this word is not enough. `[[` still
+                    // needs its own check even with the bare-`(` fix below:
+                    // `&&`/`|` inside `[[ … ]]` reopens a command position
+                    // on its own, with no `(` involved at all (confirmed:
+                    // `[[ -n $a && ssh == $b ]]` wrongly matches `ssh`
+                    // without this check). `case` no longer strictly needs
+                    // one for the shapes tried (a pattern's `(…)` is now
+                    // caught by the bare-`(` fix, and a bare pattern's
+                    // closing `)` hits the paren-imbalance check below with
+                    // nothing on the stack to pop) — kept anyway: a case
+                    // statement is still not a command list, and removing
+                    // the check was not proven safe for every pattern shape
+                    // (alternation, extglob, quoting), only the ones tested.
                     if word == "[[" || word == "case" || starts_array_assignment(word) {
                         return None;
                     }
@@ -273,6 +299,23 @@ mod tests {
         assert!(commands("case $x in (ssh) echo a;; esac").is_none());
         // ANSI-C quoting: an escaped `'` inside `$'…'` does not close it.
         assert!(commands("echo $'it\\'s' ; ssh host").is_none());
+        // A bare `(` away from a command position is never a subshell: an
+        // array literal on `declare`/`local`/`export` (the array itself is
+        // not the first word here, unlike `tools=(ssh scp)` above), a
+        // function definition, or `for ((…))`.
+        assert!(commands("declare -a tools=(ssh scp)").is_none());
+        assert!(commands("local tools=(ssh scp)").is_none());
+        assert!(commands("export TOOLS=(ssh scp)").is_none());
+        assert!(commands("f() { ssh host; }").is_none());
+        assert!(commands("for ((i=0; i<3; i++)); do ssh host; done").is_none());
+    }
+
+    #[test]
+    fn a_subshell_at_command_position_is_followed() {
+        assert!(cmds("(cd /x && ssh host)").contains(&"ssh host".to_string()));
+        assert!(cmds("ls | (ssh host)").contains(&"ssh host".to_string()));
+        assert!(cmds("x=$(ssh host uptime)").contains(&"ssh host uptime".to_string()));
+        assert!(cmds("echo \"$(ssh host)\"").contains(&"ssh host".to_string()));
     }
 
     #[test]

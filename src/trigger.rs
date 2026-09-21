@@ -131,4 +131,10 @@ mod tests {
         let t = cmd(Where::Position, Some("ssh"), None);
         assert!(!t.matches("cat <<EOF\nssh host\nEOF").unwrap());
     }
+
+    #[test]
+    fn an_array_literal_naming_the_program_is_not_a_command() {
+        let t = cmd(Where::Position, Some("ssh"), None);
+        assert!(!t.matches("tools=(ssh scp rsync)").unwrap());
+    }
 }

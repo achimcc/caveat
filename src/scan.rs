@@ -7,15 +7,34 @@ const KEYWORDS: &[&str] = &[
     "then", "do", "else", "elif", "if", "while", "until", "!", "time", "{",
 ];
 
-fn is_assignment(word: &str) -> bool {
-    let Some((name, _)) = word.split_once('=') else {
-        return false;
-    };
+fn is_identifier(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
         .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn is_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    is_identifier(name)
+}
+
+/// `NAME=(…` or `NAME+=(…`: an array literal or an append to one, not a
+/// subshell around a command. `is_assignment` alone does not catch this —
+/// it only looks at what comes before the first `=`, and a bare `(` right
+/// after still opens a command position of its own further down.
+fn starts_array_assignment(word: &str) -> bool {
+    for sep in ["+=(", "=("] {
+        if let Some((name, _)) = word.split_once(sep) {
+            if is_identifier(name) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// The simple command that starts at `from`, cut at the first character that
@@ -99,6 +118,14 @@ pub fn commands(text: &str) -> Option<Vec<&str>> {
                 if command_position {
                     let seg = segment(text, start);
                     let word = seg.split_whitespace().next().unwrap_or("");
+                    // `[[ … ]]` and `case … esac` are not command lists: a
+                    // `(` or a `&&` inside either still opens a command
+                    // position further down (the `(` dispatch below does not
+                    // know it is inside one), so skipping just this word is
+                    // not enough — the whole line is understood no further.
+                    if word == "[[" || word == "case" || starts_array_assignment(word) {
+                        return None;
+                    }
                     if !(KEYWORDS.contains(&word) || is_assignment(word)) {
                         out.push(seg);
                         command_position = false;
@@ -124,6 +151,10 @@ pub fn commands(text: &str) -> Option<Vec<&str>> {
                             break;
                         }
                         b'`' => return None,
+                        // ANSI-C quoting: this scanner's single-quote skip
+                        // above is naive and closes early on an escaped `\'`
+                        // inside `$'…'` — understood no further.
+                        b'$' if bytes.get(i + 1) == Some(&b'\'') => return None,
                         b'$' if bytes.get(i + 1) == Some(&b'(') => {
                             if bytes.get(i + 2) == Some(&b'(') {
                                 return None;
@@ -233,6 +264,19 @@ mod tests {
         assert!(commands("echo 'open").is_none());
         assert!(commands("\\").is_none());
         assert!(commands("echo \\").is_none());
+        // An array literal or append: `(` after `NAME=`/`NAME+=` is not a
+        // subshell around a command, it is a list of words.
+        assert!(commands("tools=(ssh scp rsync)").is_none());
+        assert!(commands("tools+=(ssh scp)").is_none());
+        // `[[ … ]]` is a conditional expression, not a command list — `&&`
+        // inside it does not open a command position.
+        assert!(commands("[[ $cmd =~ ^(ssh|scp)$ ]] && echo yes").is_none());
+        assert!(commands("[[ -n $a && ssh == $b ]]").is_none());
+        // `case … in (pattern) …` — the `(` around a pattern is not a
+        // subshell either.
+        assert!(commands("case $x in (ssh) echo a;; esac").is_none());
+        // ANSI-C quoting: an escaped `'` inside `$'…'` does not close it.
+        assert!(commands("echo $'it\\'s' ; ssh host").is_none());
     }
 
     #[test]

@@ -56,11 +56,16 @@ A command trigger has no `text`/`regex` of its own; instead it takes:
 
 - `program` — matches only at command position, behind `sudo`, `nice`,
   `exec`, `command`, `timeout …`, and `lotse run --class=… --`, and behind
-  a path (`/usr/bin/ssh` still matches `ssh`).
+  a path (`/usr/bin/ssh` still matches `ssh`). Only the wrapper's NAME is
+  seen through, not its own options: `sudo -u x ssh` and `nice -n 10 ssh`
+  do not match `program: ssh` — the option word (`-u`, `-n`) is taken for
+  the program name instead.
 - `pattern` — a regex the matched command segment must also satisfy.
 - `where: position` (the default) — only where the shell would actually run
-  a command: not inside a quoted string, not after the command it follows
-  in a pipeline. Needs `program`; `pattern` is then optional on top of it.
+  a command: not inside a quoted string, not as an ARGUMENT of another
+  command (`echo ssh`, `xargs ssh`, `bash -c 'ssh …'`). Each side of a pipe
+  or `&&`/`;` IS its own command position (`ls | ssh host` matches). Needs
+  `program`; `pattern` is then optional on top of it.
 - `where: anywhere` — anywhere in the raw line, quoted or not. This is what
   sees the inner command of `ssh host '…'` or `bash -c '…'`, which `where:
   position` cannot: it has no program of its own to match, and even
@@ -68,11 +73,21 @@ A command trigger has no `text`/`regex` of its own; instead it takes:
   `pattern`; `program` is then forbidden, not merely unneeded — a command
   trigger cannot combine a program name with a plain textual search.
 
+The scanner behind `where: position` is conservative: what it does not
+understand matches nothing there (`where: anywhere` still does, since it
+never parses the line). This includes a here-document, a backtick, `$((`,
+`[[ … ]]`, `case … esac`, an array literal (`x=(…`, `x+=(…`), `$'…'`
+(ANSI-C quoting), and an unclosed quote. A `\` line continuation is not
+understood either, in a weaker way: it does not make the whole trigger
+fail, but a pattern only ever sees the FIRST line — nothing past the `\`
+is there to match.
+
 `hits` and `misses` are required on every trigger: one example the trigger
 must match, one it must not. They are never executed — `caveat check` only
 runs the trigger's own matcher against the two strings, plus a shared list
 of everyday lines in `caveats/harmless.txt` that no trigger is allowed to
-match (`git status`, `ssh -F ssh_config vps`, and the like). Without that
+match (`git status`, `ssh -F ssh_config vps`, and the like). Blank lines
+and lines starting with `#` in `harmless.txt` are ignored. Without that
 file, `check` reports it missing: a trigger too broad to notice otherwise
 goes unnoticed.
 
@@ -81,7 +96,12 @@ goes unnoticed.
 - **`caveat hook claude`** — reads one Claude Code hook event from stdin,
   writes a reply to stdout if a fresh caveat matches, otherwise nothing.
   Always exits `0`: whatever goes wrong is a line in
-  `$XDG_STATE_HOME/caveat/hook.log`, never a hung tool call.
+  `$XDG_STATE_HOME/caveat/hook.log`, never a hung tool call. The default
+  state directory, when `XDG_STATE_HOME` is unset or empty, is
+  `~/.local/state/caveat`; with neither `XDG_STATE_HOME` nor `HOME` giving
+  an absolute path there is no state directory at all — the hook still
+  replies, it just keeps no log and no per-session memory of what it
+  already showed.
 - **`caveat check [--dir DIR]`** — runs the self-test (below), then checks
   every trigger of every file in `DIR` (or the nearest `caveats/` upwards
   from the current directory) against its `hits`, its `misses`, and
@@ -127,6 +147,12 @@ In `~/.claude/settings.json`, under all three events:
 it printed. Without a `caveats` directory upwards from the event's `cwd`
 (and no fallback `dir = "…"` in `$XDG_CONFIG_HOME/caveat/config.toml`), the
 hook does nothing.
+
+**The trust model in one sentence:** a `caveats/` directory found above the
+`cwd` is trusted the way a `CLAUDE.md` found there is — its text (the body
+of a matching caveat) goes straight to the model as context, unreviewed at
+that point, the same as any other file in the repository that ends up read
+by an agent working in it.
 
 ## What it does not do
 

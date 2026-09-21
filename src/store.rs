@@ -37,6 +37,7 @@ pub fn load(dir: &Path) -> Result<(Vec<Entry>, Vec<(PathBuf, anyhow::Error)>)> {
         .with_context(|| format!("reading {}", dir.display()))?
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "md"))
+        .filter(|p| p.is_file())
         .collect();
     paths.sort();
     let mut entries = Vec::new();
@@ -118,5 +119,19 @@ mod tests {
         assert_eq!(slugs, ["a", "b"]);
         assert_eq!(broken.len(), 1);
         assert!(broken[0].0.ends_with("broken.md"));
+    }
+
+    /// A directory named `x.md` is not a caveat: the `*.md` filter alone
+    /// does not say "a file", and `entry::parse` reading it as one would
+    /// add a `broken` line to every hook call.
+    #[test]
+    fn a_directory_named_like_a_caveat_is_neither_an_entry_nor_a_broken_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(tmp.path().join("a.md"), GOOD).unwrap();
+        fs::create_dir(tmp.path().join("dir.md")).unwrap();
+        let (entries, broken) = load(tmp.path()).unwrap();
+        let slugs: Vec<&str> = entries.iter().map(|e| e.slug.as_str()).collect();
+        assert_eq!(slugs, ["a"]);
+        assert!(broken.is_empty());
     }
 }

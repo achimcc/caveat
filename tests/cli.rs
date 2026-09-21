@@ -31,11 +31,17 @@ fn repo() -> tempfile::TempDir {
     tmp
 }
 
-/// The recorded event, with its cwd pointed at the test repository.
+/// The recorded event, with its cwd pointed at the test repository and,
+/// optionally, its own session id (two different sessions each log a hit).
 fn recorded(tmp: &Path) -> String {
+    recorded_for_session(tmp, "3ac76f8c-38b5-45ab-b497-21ef0a352f7d")
+}
+
+fn recorded_for_session(tmp: &Path, session_id: &str) -> String {
     let raw = std::fs::read_to_string("tests/recorded/post_tool_use.json").unwrap();
     let mut event: serde_json::Value = serde_json::from_str(&raw).unwrap();
     event["cwd"] = serde_json::Value::String(tmp.join("repo").display().to_string());
+    event["session_id"] = serde_json::Value::String(session_id.to_string());
     event.to_string()
 }
 
@@ -52,8 +58,31 @@ fn the_hook_shows_the_caveat_once_and_logs_the_hit() {
     assert!(text.contains("BODY-OF-THE-PROBE"));
     let second = run(&["hook", "claude"], &recorded(tmp.path()), &state, &config);
     assert!(second.status.success() && second.stdout.is_empty());
+    // A second, distinct session logs a second hit line: two log-producing
+    // hook runs, so the file has two lines to pin the content of.
+    let third = run(
+        &["hook", "claude"],
+        &recorded_for_session(tmp.path(), "a-different-session"),
+        &state,
+        &config,
+    );
+    assert!(third.status.success());
     let log = std::fs::read_to_string(state.join("caveat/hook.log")).unwrap();
     assert!(log.contains("hit PostToolUse probe"));
+    let lines: Vec<&str> = log.lines().collect();
+    assert_eq!(lines.len(), 2, "one line per hook run that hit: {log:?}");
+    for line in &lines {
+        assert!(
+            line.split_once(' ').is_some_and(|(ts, rest)| {
+                !ts.is_empty()
+                    && ts.chars().all(|c| c.is_ascii_digit())
+                    && (rest.starts_with("hit ")
+                        || rest.starts_with("error ")
+                        || rest.starts_with("broken "))
+            }),
+            "line does not match `^\\d+ (hit|error|broken) `: {line:?}"
+        );
+    }
 }
 
 #[test]

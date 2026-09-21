@@ -22,7 +22,12 @@ fn log(line: &str) {
         .append(true)
         .open(dir.join("hook.log"))
     {
-        let _ = writeln!(file, "{now} {line}");
+        // One `write_all` of one preformatted buffer: with `O_APPEND`, a single
+        // `write(2)` is atomic against other processes appending to the same
+        // file; several `write!` calls for one line are not (measured with
+        // strace: four writes for one line, interleavable by a concurrent
+        // session's hook run).
+        let _ = file.write_all(format!("{now} {line}\n").as_bytes());
     }
 }
 

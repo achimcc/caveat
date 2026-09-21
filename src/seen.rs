@@ -61,7 +61,10 @@ impl Seen {
             .append(true)
             .open(path)
         {
-            let _ = writeln!(file, "{slug}");
+            // One `write_all` of one preformatted buffer, for the same reason
+            // as `main::log`: `O_APPEND` makes a single `write(2)` atomic,
+            // not a line built from several of them.
+            let _ = file.write_all(format!("{slug}\n").as_bytes());
         }
     }
 }
@@ -100,5 +103,20 @@ mod tests {
         let mut seen = Seen::open(std::path::Path::new("/proc/nope"), "s", None);
         seen.add("a");
         assert!(seen.contains("a"));
+    }
+
+    /// Pins the file content after two `add`s: exactly two clean lines, no
+    /// stray blank line from a slug that was interleaved with another
+    /// process's write. `strace` shows the WHY (one `write(2)` instead of
+    /// two); this pins the WHAT.
+    #[test]
+    fn two_adds_produce_two_clean_lines_and_nothing_else() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut seen = Seen::open(tmp.path(), "s1", None);
+        seen.add("a");
+        seen.add("b");
+        let path = tmp.path().join("seen").join("s1--main.txt");
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(raw, "a\nb\n");
     }
 }

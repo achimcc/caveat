@@ -78,13 +78,16 @@ impl Seen {
         // everywhere else in this module — `add` tries again on its own
         // write. A known session — the hot path, one hook call among many
         // in the same run — skips straight past with a single `stat`.
+        // `create_new`, not `create` + `truncate`: two hooks of the same
+        // brand-new session can both pass the `stat`; a truncate by the
+        // second would wipe a slug the first has already written and show
+        // that caveat twice. `AlreadyExists` is one of the ignored errors.
         if path.metadata().is_err() {
             prune_old(&seen_dir);
             let _ = std::fs::create_dir_all(&seen_dir);
             let _ = std::fs::OpenOptions::new()
-                .create(true)
+                .create_new(true)
                 .write(true)
-                .truncate(true)
                 .open(&path);
         }
         let slugs = std::fs::read_to_string(&path)

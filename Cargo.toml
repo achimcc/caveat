@@ -1,6 +1,6 @@
 [package]
 name = "caveat"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 description = "Shows a repository's known pitfall at the moment its error message appears: a Claude Code hook over a directory of caveats"

@@ -38,9 +38,14 @@ command:
 Body **text**.
 ```
 
-`title` and `line` are required and must not be empty; `since` and `family`
-are free text, for a human reading the directory. An unknown key is an
-error — a typo must not silently be ignored.
+`title` and `line` are required, must not be empty, must fit on one line
+(no `\n`/`\r`), and must not contain either index marker's literal text
+(`<!-- caveat:index -->` / `<!-- /caveat:index -->`) — a newline would
+break `gen --index`'s one-line-per-entry shape, and the marker text would
+let a caveat's own words be mistaken for a real marker and turn an
+unrelated `check --index` into a doubled-marker tool error. `since` and
+`family` are free text, for a human reading the directory. An unknown key
+is an error — a typo must not silently be ignored.
 
 `output` triggers match what a call printed, `command` triggers match the
 command before it runs.
@@ -106,19 +111,36 @@ goes unnoticed.
   an absolute path there is no state directory at all — the hook still
   replies, it just keeps no log and no per-session memory of what it
   already showed.
-- **`caveat check [--dir DIR]`** — runs the self-test (below), then checks
-  every trigger of every file in `DIR` (or the nearest `caveats/` upwards
-  from the current directory) against its `hits`, its `misses`, and
-  `harmless.txt`. A file that fails to parse is a finding too, not a tool
-  error — it does not take the others down with it. Exit `0` if every
-  trigger holds, `1` if it printed a finding, `2` on a tool error — no
-  `caveats` directory found, the directory is empty (a check over nothing
-  says nothing), or a self-test that no longer passes.
+- **`caveat check [--dir DIR] [--index FILE]`** — runs the self-test
+  (below), then checks every trigger of every file in `DIR` (or the
+  nearest `caveats/` upwards from the current directory) against its
+  `hits`, its `misses`, and `harmless.txt`. A file that fails to parse is
+  a finding too, not a tool error — it does not take the others down with
+  it. With `--index FILE`, also compares what currently stands between
+  `FILE`'s markers against what `gen --index FILE` would write; a
+  mismatch is one more finding, `index out of date: run caveat gen
+  --index FILE`. Exit `0` if every trigger holds (and the index, if
+  checked, is current), `1` if it printed a finding, `2` on a tool error
+  — no `caveats` directory found, the directory is empty (a check over
+  nothing says nothing), a self-test that no longer passes, or `FILE`'s
+  markers are missing, doubled, or in the wrong order (that is a file
+  this cannot maintain, not a stale index).
+- **`caveat gen --index FILE [--dir DIR]`** — renders one line per caveat
+  in `DIR` — `` - **title** — line (`relative/path.md`) `` — sorted by
+  `since` ascending (entries without `since` last), then by slug, and
+  splices it into `FILE` between two marker comments,
+  `<!-- caveat:index -->` and `<!-- /caveat:index -->`, each expected on
+  its own line exactly once. Writes `FILE` only when that changes its
+  text. Exit `0` on success, `2` if a marker is missing, doubled, or in
+  the wrong order.
 - **`caveat search [--dir DIR] TEXT…`** — ranks caveats against `TEXT`:
   highest if a trigger matches it, then a title match, then a body match.
   Paste the error message itself; the triggers then work the right way
   round. Exit `0` if it printed at least one, `1` if it found nothing, `2`
   on a tool error — no query given, or no `caveats` directory found.
+- **`caveat --version` / `-V`** — prints `caveat <version>` and exits `0`.
+- **`caveat --help` / `-h` / `caveat help`** — prints the one-line usage
+  and exits `0`.
 
 ## Installing the hook
 
@@ -187,8 +209,10 @@ documentation:
   practical way around this.
 - A caveat is shown at most once per session — and a subagent counts as its
   own session: it starts with a fresh context and has not read what its
-  parent was shown. Kept in `$XDG_STATE_HOME/caveat/seen/`, one file per
-  session and agent, next to `hook.log`.
+  parent was shown. The key is the event's `session_id` plus its
+  `agent_id` (an event carries `agent_id` and `agent_type` only when it
+  comes from a subagent); kept in `$XDG_STATE_HOME/caveat/seen/`, one file
+  per session and agent, next to `hook.log`.
 - A reply carries at most 2 full caveats (title, path, body, cut at 6,000
   characters with a pointer to the file); a third and later match is named
   by title and path only.
@@ -196,24 +220,57 @@ documentation:
   file, a `grep` across `caveats/`, a red `caveat check` — each costs one
   injection. Accepted, not worked around.
 
+## Housekeeping
+
+Two things clean up after themselves — no configuration, no separate
+command:
+
+- **`hook.log` rotates.** Once it passes 1 MiB, its current content
+  becomes `hook.log.1` (overwriting an older one) and appending starts a
+  fresh, empty `hook.log`. Best-effort: two concurrent hooks can both pass
+  the size check before either renames, and the second rename then moves a
+  fresh, small log to `hook.log.1` — losing at most that one line, never
+  failing the hook.
+- **`seen/` sheds files nobody is coming back to.** A file for a session
+  or subagent untouched for 14 days is removed the next time a *new*
+  session's or subagent's own file is about to be created — the one case
+  where nobody has read it in the meantime either. An already-known
+  session's hot path (one hook call among many in the same run) skips the
+  sweep with a single `stat`.
+
 ## The self-test
 
-`caveat check` first runs a self-test: five events recorded from a real
-Claude Code run (`tests/recorded/*.json`, one per kind — `PreToolUse`,
-`PostToolUse`, a failure, and the large and truncated variants of the
-latter two) are fed to the same `respond()` that the hook calls, against
-five built-in probe caveats, and each must still produce a match. The
-events are recorded, not rebuilt from the code's own idea of the format: a
-fixture written from the same understanding as the code cannot contradict
-it, and Claude Code's actual JSON shape can. A failing self-test means the
-hook has silently stopped seeing something it used to see — checked before
-every `caveat check`, and exercised by `nix flake check` through `cargo
-test`.
+`caveat check` first runs a self-test: six events recorded from a real
+Claude Code run (`tests/recorded/*.json`, one per kind — `PreToolUse`, a
+subagent's own `PreToolUse` (its own `session_id`/`agent_id`, matched
+against the same probe as the main session's — see
+`a_subagent_has_its_own_seen_key` in `src/seen.rs`), `PostToolUse`, a
+failure, and the large and truncated variants of the latter two) are fed
+to the same `respond()` that the hook calls, against five built-in probe
+caveats, and each must still produce a match. The events are recorded,
+not rebuilt from the code's own idea of the format: a fixture written
+from the same understanding as the code cannot contradict it, and Claude
+Code's actual JSON shape can.
+
+The large case does not stop at the recording. `tool_response.stdout` is
+already cut before `ENDMARKE-ERFOLG`, the text its probe looks for, so
+matching it at all requires reading the file named by
+`tool_response.persistedOutputPath` — and the path in the recording
+exists only on the machine the recording was made on. The self-test
+therefore ships its own copy of that file's tail
+(`tests/recorded/post_tool_use_large.out`, the last 64 KiB of the
+original capture) and repoints `persistedOutputPath` at a temp file
+holding it before running. That exercises the actual file-reading code,
+not just `stdout`, inside the Nix sandbox `nix flake check` builds in —
+and needs no path outside this repository.
+
+A failing self-test means the hook has silently stopped seeing something
+it used to see — checked before every `caveat check`, and exercised by
+`nix flake check` through `cargo test`.
 
 ## Not yet
 
-An index generator over a `caveats` directory, and a hit counter reading
-`hook.log`, are planned but do not exist.
+A hit counter reading `hook.log` is planned but does not exist.
 
 ## License
 

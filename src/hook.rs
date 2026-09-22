@@ -314,6 +314,12 @@ mod tests {
         assert_eq!(reply.slugs, ["a", "b", "c"]);
     }
 
+    /// Covers the PostToolUse/output side: a broken `regex` output trigger
+    /// next to a `text` one that matches. `matches_lazily` (the path this
+    /// refactor touched) is never reached here — `PreToolUse`/command
+    /// triggers are — see
+    /// `a_broken_command_pattern_next_to_a_matching_one_still_replies`
+    /// below for that path.
     #[test]
     fn a_broken_regex_next_to_a_matching_text_trigger_still_replies() {
         let entry = parse(
@@ -324,6 +330,23 @@ mod tests {
         let reply = respond(&[entry], &event(POST), &mut Seen::memory()).unwrap();
         assert_eq!(reply.slugs, ["mixed"]);
         assert!(context(&reply).contains("BODY-MIXED"));
+    }
+
+    /// The `PreToolUse`/command counterpart: a `where: position` trigger
+    /// whose `pattern` does not compile, next to one that does and matches
+    /// — both share `program: echo`, so both pass `matches_lazily`'s
+    /// program gate and only then does the broken one's compile fail.
+    /// PRE's recorded command is `echo spike-erfolg` (see `PRE` above).
+    #[test]
+    fn a_broken_command_pattern_next_to_a_matching_one_still_replies() {
+        let entry = parse(
+            std::path::Path::new("mixed-command.md"),
+            "---\ntitle: Mixed Command\nline: l\ncommand:\n  - program: echo\n    pattern: \"(\"\n    hits: a\n    misses: b\n  - program: echo\n    pattern: spike-erfolg\n    hits: echo spike-erfolg\n    misses: x\n---\nBODY-MIXED-COMMAND\n",
+        )
+        .unwrap();
+        let reply = respond(&[entry], &event(PRE), &mut Seen::memory()).unwrap();
+        assert_eq!(reply.slugs, ["mixed-command"]);
+        assert!(context(&reply).contains("BODY-MIXED-COMMAND"));
     }
 
     #[test]

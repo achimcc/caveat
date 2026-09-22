@@ -186,8 +186,10 @@ mod tests {
 
     /// A regex trigger must be compiled once, not once per `hits`/`misses`/
     /// harmless line. Before the matcher refactor this ran every harmless
-    /// line through `Regex::new` again; over a realistic harmless.txt that
-    /// took multiple seconds. See the report for the measured before/after.
+    /// line through `Regex::new` again; measured on this 2000-line
+    /// harmless.txt with this one regex trigger, `check()` took 10.36 s
+    /// before the refactor and 0.03 s after (`nix develop --command cargo
+    /// test`, debug profile — the same profile this test runs under).
     #[test]
     fn a_regex_trigger_is_compiled_once_not_per_harmless_line() {
         let raw = "---\ntitle: T\nline: L\noutput:\n  - regex: 'permission denied: \\w+ on \\w+'\n    hits: \"permission denied: root on server\"\n    misses: \"all fine\"\n---\nB\n";

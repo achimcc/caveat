@@ -171,7 +171,15 @@ pub fn probes() -> Vec<Entry> {
         ),
         make(
             "probe-large",
-            "output:\n  - text: \"\\n6000\\n\"\n    hits: \"5999\\n6000\\n6001\"\n    misses: x\n",
+            // Must trip only through `persistedOutputPath`'s tail, not
+            // through `tool_response.stdout`'s first 30000 characters: the
+            // recorded command is `seq 1 60000; echo ENDMARKE-ERFOLG`, and
+            // that marker is written after the whole sequence — stdout's
+            // cut lands around the number 6221, so `ENDMARKE-ERFOLG` never
+            // appears there. See `self_test_large_output` for the measured
+            // proof that the trigger this replaced (`"\n6000\n"`) did NOT
+            // have that property.
+            "output:\n  - text: ENDMARKE-ERFOLG\n    hits: ENDMARKE-ERFOLG\n    misses: x\n",
             "BODY-LARGE",
         ),
         make(
@@ -191,7 +199,6 @@ pub fn self_test() -> Result<()> {
         ("pre_tool_use_subagent", PRE_SUBAGENT, "probe-command"),
         ("post_tool_use", POST, "probe-output"),
         ("post_tool_use_failure", FAILURE, "probe-failure"),
-        ("post_tool_use_large", POST_LARGE, "probe-large"),
         (
             "post_tool_use_failure_large",
             FAILURE_LARGE,
@@ -209,7 +216,56 @@ pub fn self_test() -> Result<()> {
             );
         }
     }
+    self_test_large_output(&probes)
+}
+
+/// `post_tool_use_large`'s own case, kept apart from `cases` above:
+/// `tool_response.persistedOutputPath` in that recording points at a path
+/// under `~/.claude/projects/…` that exists only on the machine the
+/// recording happened on, not in the Nix sandbox `nix flake check` builds
+/// in and not on anyone else's machine — a self-test may depend on nothing
+/// outside this repository.
+///
+/// MEASURED at HEAD before this fix (`nix flake check` here, and again by
+/// hand with the real file moved aside): `probe-large`'s old trigger
+/// (`"\n6000\n"`) sat inside `tool_response.stdout`'s first 30000
+/// characters on its own — that stdout excerpt already reaches the number
+/// 6221 before its cut. The case passed through the STDOUT path in the
+/// sandbox exactly as it did here; `persistedOutputPath` was never read at
+/// all, sandbox or not. That is the defect this function closes: it repoints
+/// `persistedOutputPath` at a temp file holding the shipped excerpt
+/// (`tests/recorded/post_tool_use_large.out`, `tail -c 65536` of the
+/// original 348910-byte capture) and the trigger now targets
+/// `ENDMARKE-ERFOLG`, the marker the recorded command
+/// (`seq 1 60000; echo ENDMARKE-ERFOLG`) writes only after the whole
+/// sequence — a string `grep -c` confirms is absent from the first 30000
+/// characters and present exactly once in the shipped excerpt. Matching now
+/// requires the FILE to be read.
+fn self_test_large_output(probes: &[Entry]) -> Result<()> {
+    let (event, _tmp) = large_event_with_persisted_output()?;
+    let reply = respond(probes, &event, &mut Seen::memory());
+    let shown = reply.map(|r| r.slugs).unwrap_or_default();
+    if !shown.iter().any(|s| s == "probe-large") {
+        bail!(
+            "self-test: the recorded event `post_tool_use_large` no longer yields \
+             `probe-large` via its persisted output file (got {shown:?})"
+        );
+    }
     Ok(())
+}
+
+/// `POST_LARGE` with `persistedOutputPath` repointed at a temp file holding
+/// `post_tool_use_large.out` (`include_bytes!`, so it ships in the crate
+/// and needs no path outside this repository). Returns the `NamedTempFile`
+/// alongside the event: it deletes itself on drop, so the caller must keep
+/// it alive for as long as the event is used.
+fn large_event_with_persisted_output() -> Result<(Value, tempfile::NamedTempFile)> {
+    const OUT: &[u8] = include_bytes!("../tests/recorded/post_tool_use_large.out");
+    let mut event: Value = serde_json::from_str(POST_LARGE)?;
+    let tmp = tempfile::NamedTempFile::new()?;
+    std::fs::write(tmp.path(), OUT)?;
+    event["tool_response"]["persistedOutputPath"] = Value::String(tmp.path().display().to_string());
+    Ok((event, tmp))
 }
 
 #[cfg(test)]
@@ -291,12 +347,23 @@ mod tests {
         // that provably does not exist (a name never written inside a
         // fresh tempdir) — not at whatever the recording happened to
         // leave behind, which may or may not still be there depending on
-        // the machine. The truncated stdout still matches on its own.
+        // the machine. `printed` must not error just because the file is
+        // gone; the truncated stdout is still there and a trigger on
+        // content that stdout's first 30000 characters actually reach
+        // (the recorded run's cut lands mid-number at 6222; a custom
+        // entry here, not `probes()`, so this stays independent of what
+        // `probe-large` itself is looking for) still matches on its own.
         let mut large = event(POST_LARGE);
         let missing_dir = tempfile::tempdir().unwrap();
         large["tool_response"]["persistedOutputPath"] =
             Value::String(missing_dir.path().join("gone.txt").display().to_string());
-        assert!(respond(&probes(), &large, &mut Seen::memory()).is_some());
+        let visible_in_stdout = parse(
+            std::path::Path::new("visible.md"),
+            "---\ntitle: Visible\nline: l\noutput:\n  - text: \"6219\\n6220\\n6221\"\n    hits: \"6219\\n6220\\n6221\"\n    misses: x\n---\nBODY-VISIBLE\n",
+        )
+        .unwrap();
+        let reply = respond(&[visible_in_stdout], &large, &mut Seen::memory()).unwrap();
+        assert_eq!(reply.slugs, ["visible"]);
         // With the file in place, the END of the output is visible, which stdout lost.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), "1\n2\nEND-MARKER-OF-THE-RUN\n").unwrap();
@@ -309,6 +376,32 @@ mod tests {
         .unwrap();
         let reply = respond(&[end], &large, &mut Seen::memory()).unwrap();
         assert_eq!(reply.slugs, ["end"]);
+    }
+
+    /// The counterpart to `self_test_large_output`: the same recorded
+    /// `POST_LARGE` event, but with `persistedOutputPath` pointing at a
+    /// file that provably does not exist, must NOT yield `probe-large` —
+    /// proof that the shipped `.out` file's content, not
+    /// `tool_response.stdout`, is what the self-test exercises. Before this
+    /// fix (`probe-large` trigger `"\n6000\n"`), this same event yielded
+    /// `probe-large` even with a missing `persistedOutputPath`, because the
+    /// truncated stdout carried it too.
+    #[test]
+    fn probe_large_needs_the_persisted_file_not_just_stdout() {
+        let mut missing = event(POST_LARGE);
+        let missing_dir = tempfile::tempdir().unwrap();
+        missing["tool_response"]["persistedOutputPath"] =
+            Value::String(missing_dir.path().join("gone.txt").display().to_string());
+        let reply = respond(&probes(), &missing, &mut Seen::memory());
+        let shown = reply.map(|r| r.slugs).unwrap_or_default();
+        assert!(
+            !shown.iter().any(|s| s == "probe-large"),
+            "probe-large fired without a persisted file: {shown:?}"
+        );
+
+        let (event, _tmp) = large_event_with_persisted_output().unwrap();
+        let reply = respond(&probes(), &event, &mut Seen::memory()).unwrap();
+        assert_eq!(reply.slugs, ["probe-large"]);
     }
 
     #[test]

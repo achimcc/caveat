@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use crate::entry::{Entry, parse};
+use crate::scan;
 use crate::seen::Seen;
 
 /// A body longer than this is cut, with a pointer to the file.
@@ -84,12 +85,18 @@ pub fn respond(entries: &[Entry], event: &Value, seen: &mut Seen) -> Option<Repl
     let hits: Vec<&Entry> = match name {
         "PreToolUse" => {
             let command = event["tool_input"]["command"].as_str()?;
+            // Scanned once per hook call and shared by every trigger of
+            // every caveat: `matches_lazily` checks `scan::program` against
+            // these segments before it ever compiles a `where: position`
+            // pattern, so a caveat whose `program` is not even in the
+            // command never pays for a `Regex::new`.
+            let segments = scan::commands(command);
             entries
                 .iter()
                 .filter(|e| {
                     e.command
                         .iter()
-                        .any(|t| t.matches(command).unwrap_or(false))
+                        .any(|t| t.matches_lazily(command, segments.as_deref()))
                 })
                 .collect()
         }
@@ -309,6 +316,18 @@ mod tests {
         assert!(text.contains("Title c"));
         assert_eq!(text.matches("[cut at").count(), 2);
         assert_eq!(reply.slugs, ["a", "b", "c"]);
+    }
+
+    #[test]
+    fn a_broken_regex_next_to_a_matching_text_trigger_still_replies() {
+        let entry = parse(
+            std::path::Path::new("mixed.md"),
+            "---\ntitle: Mixed\nline: l\noutput:\n  - regex: \"(\"\n    hits: a\n    misses: b\n  - text: spike-erfolg\n    hits: spike-erfolg\n    misses: x\n---\nBODY-MIXED\n",
+        )
+        .unwrap();
+        let reply = respond(&[entry], &event(POST), &mut Seen::memory()).unwrap();
+        assert_eq!(reply.slugs, ["mixed"]);
+        assert!(context(&reply).contains("BODY-MIXED"));
     }
 
     #[test]

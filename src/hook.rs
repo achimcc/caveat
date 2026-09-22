@@ -11,8 +11,8 @@ use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
 use crate::entry::{Entry, parse};
-use crate::scan;
 use crate::seen::Seen;
+use crate::trigger::Scanned;
 
 /// A body longer than this is cut, with a pointer to the file.
 pub const CAP: usize = 6000;
@@ -87,17 +87,13 @@ pub fn respond(entries: &[Entry], event: &Value, seen: &mut Seen) -> Option<Repl
             let command = event["tool_input"]["command"].as_str()?;
             // Scanned once per hook call and shared by every trigger of
             // every caveat: `matches_lazily` checks `scan::program` against
-            // these segments before it ever compiles a `where: position`
+            // this scan before it ever compiles a `where: position`
             // pattern, so a caveat whose `program` is not even in the
             // command never pays for a `Regex::new`.
-            let segments = scan::commands(command);
+            let scanned = Scanned::of(command);
             entries
                 .iter()
-                .filter(|e| {
-                    e.command
-                        .iter()
-                        .any(|t| t.matches_lazily(command, segments.as_deref()))
-                })
+                .filter(|e| e.command.iter().any(|t| t.matches_lazily(&scanned)))
                 .collect()
         }
         "PostToolUse" | "PostToolUseFailure" => {

@@ -6,11 +6,11 @@ fn rank(entry: &Entry, query: &str, lower: &str) -> u8 {
     let by_trigger = entry
         .output
         .iter()
-        .any(|t| t.matches(query).unwrap_or(false))
+        .any(|t| t.compile().is_ok_and(|m| m.matches(query)))
         || entry
             .command
             .iter()
-            .any(|t| t.matches(query).unwrap_or(false));
+            .any(|t| t.compile().is_ok_and(|m| m.matches(query)));
     if by_trigger {
         3
     } else if entry.title.to_lowercase().contains(lower) {

@@ -27,6 +27,9 @@ fn log(line: &str) {
     // current content becomes `hook.log.1` (overwriting an older one) and
     // appending below starts a fresh file. Any error here — the file is
     // gone, the rename fails — is ignored and appending proceeds regardless.
+    // Two concurrent hooks can both pass this size check before either
+    // renames; the second rename then moves a fresh, small `hook.log` to
+    // `hook.log.1`, losing at most that one line — accepted, never a panic.
     if std::fs::metadata(&path)
         .map(|meta| meta.len() > HOOK_LOG_ROTATE_AT)
         .unwrap_or(false)

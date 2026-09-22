@@ -102,6 +102,13 @@ pub fn splice(text: &str, block: &str) -> Result<String> {
 }
 
 /// What currently stands between the markers (same errors as `splice`).
+///
+/// Compared byte-for-byte against `render`'s output, so a hand-written
+/// index block using CRLF line endings reads as out of date even when its
+/// content otherwise matches: `check_index` reports one finding for it,
+/// `gen` then normalises the block to LF when it writes, and a second
+/// `check_index` afterwards is clean (measured: 1 finding, then 0 after
+/// `gen`).
 pub fn current_block(text: &str) -> Result<String> {
     let (begin, end) = markers(text)?;
     let inner = &text[begin + BEGIN.len()..end];

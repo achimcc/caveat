@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::index::{BEGIN, END};
+
 /// Matches the text a tool call printed.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,6 +76,21 @@ pub struct Entry {
     pub body: String,
 }
 
+/// `field` (`"title"` or `"line"`) must be one line and free of the index
+/// markers: a `\n`/`\r` breaks `index::render`'s one-line-per-entry shape,
+/// and either marker text lets a caveat's own `title`/`line` masquerade as
+/// `index::markers`' `BEGIN`/`END`, which would flip an unrelated
+/// `check --index` to a doubled-marker tool error.
+fn no_newline_or_marker(field: &str, value: &str) -> Result<()> {
+    if value.contains('\n') || value.contains('\r') {
+        bail!("`{field}` must not contain a newline");
+    }
+    if value.contains(BEGIN) || value.contains(END) {
+        bail!("`{field}` must not contain the index marker");
+    }
+    Ok(())
+}
+
 pub fn parse(path: &Path, raw: &str) -> Result<Entry> {
     let slug = path
         .file_stem()
@@ -90,6 +107,8 @@ pub fn parse(path: &Path, raw: &str) -> Result<Entry> {
     if front.title.trim().is_empty() || front.line.trim().is_empty() {
         bail!("`title` and `line` must not be empty");
     }
+    no_newline_or_marker("title", &front.title)?;
+    no_newline_or_marker("line", &front.line)?;
     for t in &front.output {
         if t.text.is_some() == t.regex.is_some() {
             bail!("an output trigger needs exactly one of `text` and `regex`");
@@ -190,5 +209,26 @@ Body **text**.
     #[test]
     fn a_file_without_frontmatter_is_an_error() {
         assert!(parse(Path::new("x.md"), "just text\n").is_err());
+    }
+
+    /// A `line` carrying an index end marker would otherwise flip the next
+    /// `check --index` to exit 2 (`markers` sees two `END`s); a `title` or
+    /// `line` with an embedded newline breaks the one-line index shape
+    /// (`index::render` puts each entry on exactly one line). Both are
+    /// caught at parse time, before either module ever sees the value.
+    #[test]
+    fn a_title_or_line_with_a_newline_is_an_error() {
+        let bad_title = "---\ntitle: \"a\\nb\"\nline: L\n---\nB\n";
+        let bad_line = "---\ntitle: T\nline: \"a\\nb\"\n---\nB\n";
+        assert!(parse(Path::new("x.md"), bad_title).is_err());
+        assert!(parse(Path::new("x.md"), bad_line).is_err());
+    }
+
+    #[test]
+    fn a_line_containing_the_index_marker_is_an_error() {
+        let begin = "---\ntitle: T\nline: \"has <!-- caveat:index --> in it\"\n---\nB\n";
+        let end = "---\ntitle: T\nline: \"has <!-- /caveat:index --> in it\"\n---\nB\n";
+        assert!(parse(Path::new("x.md"), begin).is_err());
+        assert!(parse(Path::new("x.md"), end).is_err());
     }
 }

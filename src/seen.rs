@@ -66,13 +66,26 @@ impl Seen {
 
     pub fn open(state_dir: &Path, session: &str, agent: Option<&str>) -> Seen {
         let name = format!("{}--{}.txt", safe(session), safe(agent.unwrap_or("main")));
-        let path = state_dir.join("seen").join(name);
+        let seen_dir = state_dir.join("seen");
+        let path = seen_dir.join(name);
         // A new session or subagent: sweep `seen/` for files nobody will
-        // return to before this one is created. A known session — the hot
-        // path, one hook call among many in the same run — skips straight
-        // past with a single `stat`.
+        // return to before this one is created, then create this one's
+        // file empty right away — so its mtime means "created or last
+        // shown" and the sweep runs once per truly new key, not on every
+        // hook call of a session that never shows a caveat. `add` bumps
+        // the mtime again on every write; errors creating it here (the
+        // directory can't be made, the disk is full) are ignored, same as
+        // everywhere else in this module — `add` tries again on its own
+        // write. A known session — the hot path, one hook call among many
+        // in the same run — skips straight past with a single `stat`.
         if path.metadata().is_err() {
-            prune_old(&state_dir.join("seen"));
+            prune_old(&seen_dir);
+            let _ = std::fs::create_dir_all(&seen_dir);
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&path);
         }
         let slugs = std::fs::read_to_string(&path)
             .map(|raw| raw.lines().map(String::from).collect())
@@ -148,10 +161,11 @@ mod tests {
 
         let mut subagent = Seen::open(tmp.path(), session, Some(agent));
         assert!(!subagent.contains("a"));
-        // Only `add` ever creates a file on disk (`open` merely reads one
-        // if it exists) — write on the subagent's own key too, so the
-        // "two different files" claim below is about actual files, not
-        // just two Path values that happen to differ.
+        // `open` itself creates an empty file for a brand-new key (see
+        // `open_creates_the_session_file_so_the_sweep_runs_once`), so both
+        // files already exist at this point — write on the subagent's own
+        // key too, so a caveat actually shown is part of this picture, not
+        // just an empty file.
         subagent.add("b");
 
         let files: Vec<_> = tmp.path().join("seen").read_dir().unwrap().collect();
@@ -238,5 +252,44 @@ mod tests {
         Seen::open(tmp.path(), "known", None);
 
         assert!(old.exists(), "a known session's open must not sweep");
+    }
+
+    /// `open` creates the session's file empty right away, not only on the
+    /// first `add` — so its mtime means "created or last shown", and the
+    /// 14-day sweep in `prune_old` runs once per truly NEW key, not on
+    /// every hook call of a session that never shows a caveat.
+    #[test]
+    fn open_creates_the_session_file_so_the_sweep_runs_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seen_dir = tmp.path().join("seen");
+        std::fs::create_dir_all(&seen_dir).unwrap();
+        let neighbour = seen_dir.join("neighbour--main.txt");
+        std::fs::write(&neighbour, "x\n").unwrap();
+
+        // First open of a brand-new session: creates its own file (without
+        // ever calling `add`) and, because the key was unknown, sweeps
+        // `seen/` once — the neighbour is fresh, so it survives.
+        Seen::open(tmp.path(), "brand-new", None);
+        assert!(
+            seen_dir.join("brand-new--main.txt").exists(),
+            "open must create the session file itself, before any add"
+        );
+        assert!(neighbour.exists());
+
+        // Age the neighbour past the sweep threshold, then open the SAME
+        // session again. Its file now exists, so this is the hot path: no
+        // sweep runs, and the now-old neighbour survives regardless.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(15 * 86400);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&neighbour)
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        Seen::open(tmp.path(), "brand-new", None);
+        assert!(
+            neighbour.exists(),
+            "a known session's second open must not sweep"
+        );
     }
 }

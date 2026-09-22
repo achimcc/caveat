@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use caveat::seen::Seen;
 use caveat::{check, hook, index, search, store};
 use serde_json::Value;
@@ -128,11 +128,31 @@ fn run_check(dir: Option<PathBuf>, index_file: Option<PathBuf>) -> Result<ExitCo
 
 /// `caveat gen --index FILE`: splices a freshly rendered index into `FILE`
 /// between its markers, writing back only when that changes the text.
+///
+/// Refuses — a tool error, `FILE` untouched — when `dir` yields no entries
+/// at all, or when any file in it is broken. Same spirit as `check`'s "a
+/// check over nothing says nothing", but stricter: `check` can still name
+/// a broken file as one finding among others, because it never writes
+/// anything. `gen` writes; rendering from the caveats that DID parse would
+/// silently drop the broken one from the index, and an empty or mistyped
+/// `--dir` would blank whatever the index already held.
 fn run_gen(dir: Option<PathBuf>, index_file: PathBuf) -> Result<ExitCode> {
     let dir = dir_or_found(dir)?;
     let (entries, broken) = store::load(&dir)?;
     for (path, error) in &broken {
         eprintln!("caveat: {}: {error:#}", path.display());
+    }
+    if entries.is_empty() || !broken.is_empty() {
+        bail!(
+            "refusing to write {}: {} in {}, leaving it untouched",
+            index_file.display(),
+            if broken.is_empty() {
+                "no caveats".to_string()
+            } else {
+                format!("{} broken file(s)", broken.len())
+            },
+            dir.display()
+        );
     }
     let text = std::fs::read_to_string(&index_file)
         .with_context(|| format!("reading {}", index_file.display()))?;
@@ -203,6 +223,13 @@ fn main() -> ExitCode {
         args.remove(at);
     }
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
+    // `--index` is only meaningful to `check` and `gen`; a `search` or
+    // `hook claude` that carries it anyway would otherwise silently drop
+    // the flag instead of saying it makes no sense there.
+    if index_file.is_some() && !matches!(words.first(), Some(&"check") | Some(&"gen")) {
+        eprintln!("{USAGE}");
+        return ExitCode::from(2);
+    }
     let result = match words.as_slice() {
         ["hook", "claude"] => {
             if let Err(error) = run_hook() {

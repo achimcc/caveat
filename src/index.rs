@@ -66,25 +66,45 @@ pub fn render(entries: &[Entry], index_file: &Path) -> String {
 
 /// The byte offset of the one and only `BEGIN` and the one and only `END`,
 /// with `END` at or after `BEGIN`. Anything else — a missing marker, a
-/// doubled one, `END` before `BEGIN` — is a tool error, not a finding: the
-/// file is not in the shape this module can maintain.
+/// doubled one, `END` before `BEGIN`, a marker sharing its line with other
+/// text — is a tool error, not a finding: the file is not in the shape
+/// this module can maintain. A marker only counts on a line that, after
+/// trimming one trailing `\r` (a CRLF file), equals the marker exactly —
+/// `splice`'s `text[..begin + BEGIN.len()]` and `text[end..]` slicing
+/// depends on that: a marker with leading or trailing text on its line
+/// would otherwise cut mid-line.
 fn markers(text: &str) -> Result<(usize, usize)> {
-    let mut begins = text.match_indices(BEGIN);
-    let begin = begins
-        .next()
-        .map(|(i, _)| i)
-        .ok_or_else(|| anyhow::anyhow!("{BEGIN} marker is missing"))?;
-    if begins.next().is_some() {
-        bail!("{BEGIN} marker appears more than once");
+    let mut begin = None;
+    let mut end = None;
+    let mut offset = 0usize;
+    for raw_line in text.split_inclusive('\n') {
+        let without_newline = raw_line.strip_suffix('\n').unwrap_or(raw_line);
+        let line = without_newline
+            .strip_suffix('\r')
+            .unwrap_or(without_newline);
+        let has_begin = line.contains(BEGIN);
+        let has_end = line.contains(END);
+        if has_begin || has_end {
+            if line != BEGIN && line != END {
+                bail!("a marker must stand alone on its line: {line:?}");
+            }
+            if has_begin {
+                if begin.is_some() {
+                    bail!("{BEGIN} marker appears more than once");
+                }
+                begin = Some(offset);
+            }
+            if has_end {
+                if end.is_some() {
+                    bail!("{END} marker appears more than once");
+                }
+                end = Some(offset);
+            }
+        }
+        offset += raw_line.len();
     }
-    let mut ends = text.match_indices(END);
-    let end = ends
-        .next()
-        .map(|(i, _)| i)
-        .ok_or_else(|| anyhow::anyhow!("{END} marker is missing"))?;
-    if ends.next().is_some() {
-        bail!("{END} marker appears more than once");
-    }
+    let begin = begin.ok_or_else(|| anyhow::anyhow!("{BEGIN} marker is missing"))?;
+    let end = end.ok_or_else(|| anyhow::anyhow!("{END} marker is missing"))?;
     if end < begin {
         bail!("{END} marker precedes {BEGIN}");
     }
@@ -171,6 +191,20 @@ mod tests {
         assert!(splice(&format!("no begin\n{END}\n"), "x").is_err());
         assert!(splice(&format!("{BEGIN}\nno end\n"), "x").is_err());
         assert!(splice(&format!("{BEGIN}\n{BEGIN}\n{END}\n"), "x").is_err());
+    }
+
+    /// README's command reference for `gen --index`/`check --index` already
+    /// states the precondition ("each expected on its own line exactly
+    /// once") — this pins that `markers` enforces it: a marker sharing its
+    /// line with other text (before, after, or CRLF's `\r` aside) is a
+    /// marker error, same as a missing or doubled one.
+    #[test]
+    fn a_marker_that_is_not_alone_on_its_line_is_an_error() {
+        assert!(splice(&format!("prefix {BEGIN}\n{END}\n"), "x").is_err());
+        assert!(splice(&format!("{BEGIN}\n{END} suffix\n"), "x").is_err());
+        assert!(splice(&format!("{BEGIN} and {END} on one line\n"), "x").is_err());
+        // A trailing `\r` alone (CRLF) is still "alone on its line".
+        assert!(splice(&format!("{BEGIN}\r\nalt\r\n{END}\r\n"), "x").is_ok());
     }
 
     #[test]

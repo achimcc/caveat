@@ -295,6 +295,128 @@ fn gen_writes_the_index_and_check_index_sees_it_go_stale() {
     assert_eq!(check_broken.status.code(), Some(2));
 }
 
+/// `check`'s rule ("a check over nothing says nothing") is not enough for
+/// `gen`: an empty `--dir` there does not just say nothing, it WRITES
+/// nothing — blanking whatever an existing index held. And a broken file
+/// must not silently make `gen` render an index of the OTHER caveats,
+/// hiding that one entry is missing. Both must refuse: exit 2, index file
+/// untouched.
+#[test]
+fn gen_refuses_an_empty_or_broken_caveats_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("repo/caveats");
+    std::fs::create_dir_all(&dir).unwrap();
+    let claude = tmp.path().join("repo/CLAUDE.md");
+    let before =
+        "# CLAUDE.md\n\n<!-- caveat:index -->\nold content\n<!-- /caveat:index -->\n\nmore text\n";
+    std::fs::write(&claude, before).unwrap();
+    let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));
+    let dir_arg = dir.to_str().unwrap();
+    let claude_arg = claude.to_str().unwrap();
+
+    let empty = run(
+        &["gen", "--dir", dir_arg, "--index", claude_arg],
+        "",
+        &state,
+        &config,
+    );
+    assert_eq!(empty.status.code(), Some(2));
+    assert_eq!(
+        std::fs::read_to_string(&claude).unwrap(),
+        before,
+        "an empty caveats dir must not blank an existing index"
+    );
+
+    std::fs::write(dir.join("broken.md"), "no frontmatter\n").unwrap();
+    let broken = run(
+        &["gen", "--dir", dir_arg, "--index", claude_arg],
+        "",
+        &state,
+        &config,
+    );
+    assert_eq!(broken.status.code(), Some(2));
+    assert_eq!(
+        std::fs::read_to_string(&claude).unwrap(),
+        before,
+        "a broken file must not make gen render an index of only the others"
+    );
+}
+
+#[test]
+fn gen_leaves_a_current_index_file_unwritten() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("repo/caveats");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("a.md"),
+        "---\ntitle: A title\nline: a line\noutput:\n  - text: hit-a\n    hits: hit-a\n    misses: x\n---\nBODY-A\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("harmless.txt"), "git status\n").unwrap();
+    let claude = tmp.path().join("repo/CLAUDE.md");
+    std::fs::write(
+        &claude,
+        "# CLAUDE.md\n\n<!-- caveat:index -->\nalt\n<!-- /caveat:index -->\n\nmore text\n",
+    )
+    .unwrap();
+    let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));
+    let dir_arg = dir.to_str().unwrap();
+    let claude_arg = claude.to_str().unwrap();
+
+    let first = run(
+        &["gen", "--dir", dir_arg, "--index", claude_arg],
+        "",
+        &state,
+        &config,
+    );
+    assert_eq!(first.status.code(), Some(0));
+
+    // Pin the mtime to an hour in the past, so "unchanged" is provable even
+    // when both runs land in the same second.
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&claude)
+        .unwrap()
+        .set_modified(past)
+        .unwrap();
+    let before = std::fs::metadata(&claude).unwrap().modified().unwrap();
+
+    let second = run(
+        &["gen", "--dir", dir_arg, "--index", claude_arg],
+        "",
+        &state,
+        &config,
+    );
+    assert_eq!(second.status.code(), Some(0));
+    let after = std::fs::metadata(&claude).unwrap().modified().unwrap();
+    assert_eq!(
+        before, after,
+        "gen must not rewrite a file whose index is already current"
+    );
+}
+
+/// Only `check` and `gen` read the markers `--index` names; `search` has
+/// no use for it and must not silently ignore the flag.
+#[test]
+fn search_with_index_is_a_usage_error() {
+    let tmp = repo();
+    let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));
+    let dir = tmp.path().join("repo/caveats");
+    let dir_arg = dir.to_str().unwrap();
+    assert_eq!(
+        run(
+            &["search", "--dir", dir_arg, "--index", "x", "TEXT"],
+            "",
+            &state,
+            &config,
+        )
+        .status
+        .code(),
+        Some(2)
+    );
+}
+
 #[test]
 fn search_finds_by_a_pasted_message_and_exits_one_on_nothing() {
     let tmp = repo();

@@ -231,12 +231,14 @@ command:
   the size check before either renames, and the second rename then moves a
   fresh, small log to `hook.log.1` — losing at most that one line, never
   failing the hook.
-- **`seen/` sheds files nobody is coming back to.** A file for a session
-  or subagent untouched for 14 days is removed the next time a *new*
-  session's or subagent's own file is about to be created — the one case
-  where nobody has read it in the meantime either. An already-known
-  session's hot path (one hook call among many in the same run) skips the
-  sweep with a single `stat`.
+- **`seen/` sheds files nobody is coming back to.** A file's mtime means
+  "created or last shown": `open` creates it, empty, the moment a session
+  or subagent is first seen, and every `add` afterwards bumps it again. A
+  file untouched for 14 days is removed the next time a *new* session's or
+  subagent's own file is about to be created — the one case where nobody
+  has read it in the meantime either. An already-known session's hot path
+  (one hook call among many in the same run) skips the sweep with a
+  single `stat`.
 
 ## The self-test
 
@@ -262,7 +264,8 @@ therefore ships its own copy of that file's tail
 original capture) and repoints `persistedOutputPath` at a temp file
 holding it before running. That exercises the actual file-reading code,
 not just `stdout`, inside the Nix sandbox `nix flake check` builds in —
-and needs no path outside this repository.
+and needs no path outside this repository, only a writable temp dir
+(`tempfile`).
 
 A failing self-test means the hook has silently stopped seeing something
 it used to see — checked before every `caveat check`, and exercised by

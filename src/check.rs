@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
+use crate::trigger::Matches;
 use crate::{hook, store};
 
 pub struct Finding {
@@ -11,14 +12,17 @@ pub struct Finding {
     pub message: String,
 }
 
-/// One trigger against its two examples and the harmless lines.
-fn examine(
+/// One trigger against its two examples and the harmless lines. `compiled`
+/// is computed once by the caller (`trigger.compile()`) and reused for
+/// every example and every harmless line — a compile error is exactly the
+/// finding it always was, just reported once instead of on every call.
+fn examine<M: Matches>(
     path: &Path,
     label: &str,
+    compiled: Result<M>,
     hits: &str,
     misses: &str,
     harmless: &[String],
-    matches: &dyn Fn(&str) -> Result<bool>,
     out: &mut Vec<Finding>,
 ) {
     let mut push = |message: String| {
@@ -27,16 +31,18 @@ fn examine(
             message,
         })
     };
-    match matches(hits) {
+    let matcher = match compiled {
         Err(error) => return push(format!("{label}: {error:#}")),
-        Ok(false) => push(format!("{label} does not match its `hits`: {hits:?}")),
-        Ok(true) => {}
+        Ok(matcher) => matcher,
+    };
+    if !matcher.matches(hits) {
+        push(format!("{label} does not match its `hits`: {hits:?}"));
     }
-    if matches(misses).unwrap_or(false) {
+    if matcher.matches(misses) {
         push(format!("{label} matches its `misses`: {misses:?}"));
     }
     for line in harmless {
-        if matches(line).unwrap_or(false) {
+        if matcher.matches(line) {
             push(format!("{label} matches a line of harmless.txt: {line:?}"));
         }
     }
@@ -81,10 +87,10 @@ pub fn check(dir: &Path) -> Result<Vec<Finding>> {
             examine(
                 &entry.path,
                 &label,
+                t.compile(),
                 &t.hits,
                 &t.misses,
                 &harmless,
-                &|s| t.matches(s),
                 &mut findings,
             );
         }
@@ -93,10 +99,10 @@ pub fn check(dir: &Path) -> Result<Vec<Finding>> {
             examine(
                 &entry.path,
                 &label,
+                t.compile(),
                 &t.hits,
                 &t.misses,
                 &harmless,
-                &|s| t.matches(s),
                 &mut findings,
             );
         }
@@ -176,5 +182,27 @@ mod tests {
     fn an_empty_directory_is_a_tool_error_not_a_pass() {
         let tmp = dir_with(&[("harmless.txt", "git status\n")]);
         assert!(check(tmp.path()).is_err());
+    }
+
+    /// A regex trigger must be compiled once, not once per `hits`/`misses`/
+    /// harmless line. Before the matcher refactor this ran every harmless
+    /// line through `Regex::new` again; over a realistic harmless.txt that
+    /// took multiple seconds. See the report for the measured before/after.
+    #[test]
+    fn a_regex_trigger_is_compiled_once_not_per_harmless_line() {
+        let raw = "---\ntitle: T\nline: L\noutput:\n  - regex: 'permission denied: \\w+ on \\w+'\n    hits: \"permission denied: root on server\"\n    misses: \"all fine\"\n---\nB\n";
+        let harmless: String = (0..2000)
+            .map(|i| format!("harmless line number {i} about something else entirely\n"))
+            .collect();
+        let tmp = dir_with(&[("a.md", raw), ("harmless.txt", &harmless)]);
+        let start = std::time::Instant::now();
+        let found = check(tmp.path()).unwrap();
+        let elapsed = start.elapsed();
+        let messages: Vec<&str> = found.iter().map(|f| f.message.as_str()).collect();
+        assert!(found.is_empty(), "{messages:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "check() took {elapsed:?} for 2000 harmless lines against one regex trigger"
+        );
     }
 }

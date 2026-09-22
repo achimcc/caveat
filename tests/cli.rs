@@ -242,6 +242,34 @@ fn search_reports_a_broken_file_on_stderr() {
 }
 
 #[test]
+fn version_prints_the_crate_version() {
+    let out = Command::new(env!("CARGO_BIN_EXE_caveat"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        format!("caveat {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
+fn help_goes_to_stdout_with_exit_zero() {
+    for flag in ["--help", "-h", "help"] {
+        let out = Command::new(env!("CARGO_BIN_EXE_caveat"))
+            .arg(flag)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{flag}");
+        assert!(
+            String::from_utf8_lossy(&out.stdout).starts_with("usage: caveat"),
+            "{flag}"
+        );
+    }
+}
+
+#[test]
 fn an_unknown_command_is_usage_and_exit_two() {
     let tmp = repo();
     let out = run(

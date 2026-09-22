@@ -7,8 +7,8 @@ use caveat::seen::Seen;
 use caveat::{check, hook, search, store};
 use serde_json::Value;
 
-const USAGE: &str =
-    "usage: caveat hook claude | caveat check [--dir DIR] | caveat search [--dir DIR] TEXT…";
+const USAGE: &str = "usage: caveat hook claude | caveat check [--dir DIR] [--index FILE] | \
+caveat search [--dir DIR] TEXT… | caveat gen --index FILE | caveat --version | caveat --help";
 
 fn log(line: &str) {
     // Neither `XDG_STATE_HOME` nor `HOME` gives an absolute path: there is
@@ -119,6 +119,22 @@ fn run_search(dir: Option<PathBuf>, query: &str) -> Result<ExitCode> {
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    match args
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .as_slice()
+    {
+        ["--version"] | ["-V"] => {
+            println!("caveat {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
+        ["--help"] | ["-h"] | ["help"] => {
+            println!("{USAGE}");
+            return ExitCode::SUCCESS;
+        }
+        _ => {}
+    }
     let mut dir = None;
     if let Some(at) = args.iter().position(|a| a == "--dir") {
         if at + 1 >= args.len() {

@@ -10,6 +10,10 @@ use serde_json::Value;
 const USAGE: &str = "usage: caveat hook claude | caveat check [--dir DIR] [--index FILE] | \
 caveat search [--dir DIR] TEXT… | caveat gen --index FILE | caveat --version | caveat --help";
 
+/// Bytes past which `log` rotates `hook.log` to `hook.log.1` before
+/// appending: 1 MiB.
+const HOOK_LOG_ROTATE_AT: u64 = 1 << 20;
+
 fn log(line: &str) {
     // Neither `XDG_STATE_HOME` nor `HOME` gives an absolute path: there is
     // nowhere safe to write, and staying quiet beats creating
@@ -18,6 +22,17 @@ fn log(line: &str) {
         return;
     };
     let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("hook.log");
+    // Keep the file from growing without bound: past the threshold, its
+    // current content becomes `hook.log.1` (overwriting an older one) and
+    // appending below starts a fresh file. Any error here — the file is
+    // gone, the rename fails — is ignored and appending proceeds regardless.
+    if std::fs::metadata(&path)
+        .map(|meta| meta.len() > HOOK_LOG_ROTATE_AT)
+        .unwrap_or(false)
+    {
+        let _ = std::fs::rename(&path, dir.join("hook.log.1"));
+    }
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -25,7 +40,7 @@ fn log(line: &str) {
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("hook.log"))
+        .open(&path)
     {
         // One `write_all` of one preformatted buffer: with `O_APPEND`, a single
         // `write(2)` is atomic against other processes appending to the same

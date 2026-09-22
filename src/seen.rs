@@ -6,10 +6,42 @@
 use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 pub struct Seen {
     path: Option<PathBuf>,
     slugs: BTreeSet<String>,
+}
+
+/// A `seen` file this long untouched belongs to a session or subagent
+/// nobody is coming back to: two weeks.
+const MAX_AGE: Duration = Duration::from_secs(14 * 24 * 60 * 60);
+
+/// Drops every regular file in `seen_dir` whose `modified` time is older
+/// than `MAX_AGE`. Errors — the directory does not exist yet, a file
+/// vanished, its time is unreadable — are ignored: this must never fail
+/// the hook it runs inside of.
+fn prune_old(seen_dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(seen_dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        // `Err` here means `modified` is in the future relative to `now`:
+        // not old, so left alone rather than treated as ancient.
+        if now.duration_since(modified).is_ok_and(|age| age > MAX_AGE) {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn safe(id: &str) -> String {
@@ -35,6 +67,13 @@ impl Seen {
     pub fn open(state_dir: &Path, session: &str, agent: Option<&str>) -> Seen {
         let name = format!("{}--{}.txt", safe(session), safe(agent.unwrap_or("main")));
         let path = state_dir.join("seen").join(name);
+        // A new session or subagent: sweep `seen/` for files nobody will
+        // return to before this one is created. A known session — the hot
+        // path, one hook call among many in the same run — skips straight
+        // past with a single `stat`.
+        if path.metadata().is_err() {
+            prune_old(&state_dir.join("seen"));
+        }
         let slugs = std::fs::read_to_string(&path)
             .map(|raw| raw.lines().map(String::from).collect())
             .unwrap_or_default();
@@ -118,5 +157,54 @@ mod tests {
         let path = tmp.path().join("seen").join("s1--main.txt");
         let raw = std::fs::read_to_string(&path).unwrap();
         assert_eq!(raw, "a\nb\n");
+    }
+
+    /// A `seen` file two weeks untouched has no session left to return to it:
+    /// `open` for a brand-new session sweeps it away before creating its own
+    /// file, but leaves a recent neighbour alone.
+    #[test]
+    fn open_removes_seen_files_older_than_two_weeks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seen_dir = tmp.path().join("seen");
+        std::fs::create_dir_all(&seen_dir).unwrap();
+        let old = seen_dir.join("old--main.txt");
+        std::fs::write(&old, "a\n").unwrap();
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(15 * 86400);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+        let fresh = seen_dir.join("fresh--main.txt");
+        std::fs::write(&fresh, "b\n").unwrap();
+
+        Seen::open(tmp.path(), "brand-new-session", None);
+
+        assert!(!old.exists(), "a file older than 14 days must be gone");
+        assert!(fresh.exists(), "a recent neighbour must stay");
+    }
+
+    /// Opening a session whose file already exists is the hot path: no
+    /// directory sweep, so an old neighbour survives untouched.
+    #[test]
+    fn open_of_a_known_session_does_not_touch_its_neighbours() {
+        let tmp = tempfile::tempdir().unwrap();
+        let seen_dir = tmp.path().join("seen");
+        std::fs::create_dir_all(&seen_dir).unwrap();
+        let old = seen_dir.join("old--main.txt");
+        std::fs::write(&old, "a\n").unwrap();
+        let old_time = std::time::SystemTime::now() - std::time::Duration::from_secs(15 * 86400);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&old)
+            .unwrap()
+            .set_modified(old_time)
+            .unwrap();
+        std::fs::write(seen_dir.join("known--main.txt"), "b\n").unwrap();
+
+        Seen::open(tmp.path(), "known", None);
+
+        assert!(old.exists(), "a known session's open must not sweep");
     }
 }

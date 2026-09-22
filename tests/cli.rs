@@ -166,6 +166,32 @@ fn a_broken_stdin_is_silent_exits_zero_and_leaves_a_log_line() {
 }
 
 #[test]
+fn a_large_hook_log_is_rotated_once() {
+    let tmp = repo();
+    let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));
+    let log_dir = state.join("caveat");
+    std::fs::create_dir_all(&log_dir).unwrap();
+    let log_path = log_dir.join("hook.log");
+    // The content does not matter, only the size: 1 MiB + 1 byte, one over
+    // the rotation threshold.
+    std::fs::write(&log_path, vec![b'x'; (1 << 20) + 1]).unwrap();
+    let old_size = std::fs::metadata(&log_path).unwrap().len();
+
+    let out = run(&["hook", "claude"], "kaputt", &state, &config);
+    assert!(out.status.success());
+
+    let rotated = std::fs::metadata(log_dir.join("hook.log.1")).unwrap();
+    assert_eq!(rotated.len(), old_size, "hook.log.1 keeps the old content");
+    let new_log = std::fs::read_to_string(&log_path).unwrap();
+    assert_eq!(
+        new_log.lines().count(),
+        1,
+        "hook.log starts over with one line: {new_log:?}"
+    );
+    assert!(new_log.contains("error"));
+}
+
+#[test]
 fn check_exits_zero_one_and_two() {
     let tmp = repo();
     let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));

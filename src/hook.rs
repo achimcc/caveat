@@ -22,6 +22,7 @@ pub const FULL: usize = 2;
 pub const TAIL: u64 = 8 * 1024 * 1024;
 
 const PRE: &str = include_str!("../tests/recorded/pre_tool_use.json");
+const PRE_SUBAGENT: &str = include_str!("../tests/recorded/pre_tool_use_subagent.json");
 const POST: &str = include_str!("../tests/recorded/post_tool_use.json");
 const FAILURE: &str = include_str!("../tests/recorded/post_tool_use_failure.json");
 const POST_LARGE: &str = include_str!("../tests/recorded/post_tool_use_large.json");
@@ -151,7 +152,11 @@ pub fn probes() -> Vec<Entry> {
     vec![
         make(
             "probe-command",
-            "command:\n  - program: echo\n    pattern: spike-erfolg\n    hits: echo spike-erfolg\n    misses: echo x\n",
+            // Must trip on both recorded PreToolUse fixtures (`PRE`'s
+            // `echo spike-erfolg` and `PRE_SUBAGENT`'s
+            // `echo subagent-probe-2026-09-22`) without widening past
+            // those two, so the alternation stays literal.
+            "command:\n  - program: echo\n    pattern: \"spike-erfolg|subagent-probe-2026-09-22\"\n    hits: echo spike-erfolg\n    misses: echo x\n",
             "BODY-COMMAND",
         ),
         make(
@@ -183,6 +188,7 @@ pub fn probes() -> Vec<Entry> {
 pub fn self_test() -> Result<()> {
     let cases = [
         ("pre_tool_use", PRE, "probe-command"),
+        ("pre_tool_use_subagent", PRE_SUBAGENT, "probe-command"),
         ("post_tool_use", POST, "probe-output"),
         ("post_tool_use_failure", FAILURE, "probe-failure"),
         ("post_tool_use_large", POST_LARGE, "probe-large"),
@@ -236,6 +242,16 @@ mod tests {
         assert_eq!(reply.slugs, ["probe-command"]);
         assert!(context(&reply).contains("BODY-COMMAND"));
         assert!(context(&reply).contains("probe-command.md"));
+    }
+
+    /// The readable counterpart to the `pre_tool_use_subagent` case in
+    /// `self_test`: a subagent's PreToolUse event carries its own command
+    /// (`echo subagent-probe-2026-09-22`) and must still trip
+    /// `probe-command`, same as the main session's `pre_tool_use` does.
+    #[test]
+    fn a_subagent_pre_tool_use_event_still_triggers_probe_command() {
+        let reply = respond(&probes(), &event(PRE_SUBAGENT), &mut Seen::memory()).unwrap();
+        assert_eq!(reply.slugs, ["probe-command"]);
     }
 
     #[test]

@@ -130,6 +130,38 @@ mod tests {
         assert!(!Seen::open(tmp.path(), "s1", Some("agent-7")).contains("a"));
     }
 
+    /// Same claim as `another_session_and_a_subagent_start_fresh`, but with
+    /// `session_id` and `agent_id` taken from a real recorded subagent
+    /// PreToolUse event instead of a literal, and pinning that the two
+    /// end up as two distinct files under `seen/`.
+    #[test]
+    fn a_subagent_has_its_own_seen_key() {
+        const RAW: &str = include_str!("../tests/recorded/pre_tool_use_subagent.json");
+        let event: serde_json::Value = serde_json::from_str(RAW).unwrap();
+        let session = event["session_id"].as_str().unwrap();
+        let agent = event["agent_id"].as_str().unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut main = Seen::open(tmp.path(), session, None);
+        main.add("a");
+        assert!(main.contains("a"));
+
+        let mut subagent = Seen::open(tmp.path(), session, Some(agent));
+        assert!(!subagent.contains("a"));
+        // Only `add` ever creates a file on disk (`open` merely reads one
+        // if it exists) — write on the subagent's own key too, so the
+        // "two different files" claim below is about actual files, not
+        // just two Path values that happen to differ.
+        subagent.add("b");
+
+        let files: Vec<_> = tmp.path().join("seen").read_dir().unwrap().collect();
+        assert_eq!(
+            files.len(),
+            2,
+            "main and subagent must land in different files"
+        );
+    }
+
     #[test]
     fn an_id_cannot_leave_the_directory() {
         let tmp = tempfile::tempdir().unwrap();

@@ -195,6 +195,81 @@ fn check_exits_zero_one_and_two() {
 }
 
 #[test]
+fn gen_writes_the_index_and_check_index_sees_it_go_stale() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("repo/caveats");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("a.md"),
+        "---\ntitle: A title\nline: a line\noutput:\n  - text: hit-a\n    hits: hit-a\n    misses: x\n---\nBODY-A\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.join("b.md"),
+        "---\ntitle: B title\nline: b line\noutput:\n  - text: hit-b\n    hits: hit-b\n    misses: y\n---\nBODY-B\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("harmless.txt"), "git status\n").unwrap();
+    let claude = tmp.path().join("repo/CLAUDE.md");
+    std::fs::write(
+        &claude,
+        "# CLAUDE.md\n\n<!-- caveat:index -->\nalt\n<!-- /caveat:index -->\n\nmore text\n",
+    )
+    .unwrap();
+    let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));
+    let dir_arg = dir.to_str().unwrap();
+    let claude_arg = claude.to_str().unwrap();
+
+    let generated = run(
+        &["gen", "--dir", dir_arg, "--index", claude_arg],
+        "",
+        &state,
+        &config,
+    );
+    assert_eq!(generated.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&generated.stdout).contains("2 entries"));
+    let after_gen = std::fs::read_to_string(&claude).unwrap();
+    assert_eq!(after_gen.matches("- **").count(), 2);
+    assert!(!after_gen.contains("alt"));
+    assert!(after_gen.starts_with("# CLAUDE.md\n\n"));
+    assert!(after_gen.ends_with("\nmore text\n"));
+
+    let check_ok = run(
+        &["check", "--dir", dir_arg, "--index", claude_arg],
+        "",
+        &state,
+        &config,
+    );
+    assert_eq!(check_ok.status.code(), Some(0));
+
+    // Bend one index line by hand: `check --index` must notice.
+    let bent = after_gen.replace("A title", "A title, bent");
+    std::fs::write(&claude, &bent).unwrap();
+    let check_stale = run(
+        &["check", "--dir", dir_arg, "--index", claude_arg],
+        "",
+        &state,
+        &config,
+    );
+    assert_eq!(check_stale.status.code(), Some(1));
+    assert!(
+        String::from_utf8_lossy(&check_stale.stdout).contains("index out of date"),
+        "{:?}",
+        String::from_utf8_lossy(&check_stale.stdout)
+    );
+
+    // Remove the markers entirely: a tool error, not a finding.
+    std::fs::write(&claude, "# CLAUDE.md\n\nno markers here\n").unwrap();
+    let check_broken = run(
+        &["check", "--dir", dir_arg, "--index", claude_arg],
+        "",
+        &state,
+        &config,
+    );
+    assert_eq!(check_broken.status.code(), Some(2));
+}
+
+#[test]
 fn search_finds_by_a_pasted_message_and_exits_one_on_nothing() {
     let tmp = repo();
     let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));

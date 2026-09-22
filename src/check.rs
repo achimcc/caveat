@@ -2,10 +2,10 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use crate::trigger::Matches;
-use crate::{hook, store};
+use crate::{hook, index, store};
 
 pub struct Finding {
     pub path: PathBuf,
@@ -110,6 +110,29 @@ pub fn check(dir: &Path) -> Result<Vec<Finding>> {
     Ok(findings)
 }
 
+/// The one finding an out-of-date index produces, or `None` when
+/// `index_file`'s block already matches what `index::render` would write.
+/// A missing or doubled marker is a tool error (`Err`), same as
+/// `index::current_block` itself — the file is not one this can maintain,
+/// not a stale index.
+pub fn check_index(dir: &Path, index_file: &Path) -> Result<Option<Finding>> {
+    let (entries, _broken) = store::load(dir)?;
+    let text = std::fs::read_to_string(index_file)
+        .with_context(|| format!("reading {}", index_file.display()))?;
+    let current = index::current_block(&text)?;
+    let wanted = index::render(&entries, index_file);
+    if current == wanted {
+        return Ok(None);
+    }
+    Ok(Some(Finding {
+        path: index_file.to_path_buf(),
+        message: format!(
+            "index out of date: run `caveat gen --index {}`",
+            index_file.display()
+        ),
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -206,5 +229,34 @@ mod tests {
             elapsed < std::time::Duration::from_secs(2),
             "check() took {elapsed:?} for 2000 harmless lines against one regex trigger"
         );
+    }
+
+    #[test]
+    fn check_index_is_none_when_fresh_and_some_when_stale() {
+        let tmp = dir_with(&[("a.md", GOOD)]);
+        let index_file = tmp.path().join("CLAUDE.md");
+        let parsed = crate::entry::parse(&tmp.path().join("a.md"), GOOD).unwrap();
+        let block = index::render(&[parsed], &index_file);
+        fs::write(
+            &index_file,
+            format!("before\n{}\n{block}{}\nafter\n", index::BEGIN, index::END),
+        )
+        .unwrap();
+        assert!(check_index(tmp.path(), &index_file).unwrap().is_none());
+        fs::write(
+            &index_file,
+            format!("before\n{}\nstale\n{}\nafter\n", index::BEGIN, index::END),
+        )
+        .unwrap();
+        let found = check_index(tmp.path(), &index_file).unwrap().unwrap();
+        assert!(found.message.contains("index out of date"));
+    }
+
+    #[test]
+    fn check_index_propagates_a_marker_error() {
+        let tmp = dir_with(&[("a.md", GOOD)]);
+        let index_file = tmp.path().join("CLAUDE.md");
+        fs::write(&index_file, "no markers here\n").unwrap();
+        assert!(check_index(tmp.path(), &index_file).is_err());
     }
 }

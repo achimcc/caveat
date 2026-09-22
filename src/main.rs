@@ -4,7 +4,7 @@ use std::process::ExitCode;
 
 use anyhow::{Context, Result};
 use caveat::seen::Seen;
-use caveat::{check, hook, search, store};
+use caveat::{check, hook, index, search, store};
 use serde_json::Value;
 
 const USAGE: &str = "usage: caveat hook claude | caveat check [--dir DIR] [--index FILE] | \
@@ -84,9 +84,16 @@ fn dir_or_found(dir: Option<PathBuf>) -> Result<PathBuf> {
     }
 }
 
-fn run_check(dir: Option<PathBuf>) -> Result<ExitCode> {
+fn run_check(dir: Option<PathBuf>, index_file: Option<PathBuf>) -> Result<ExitCode> {
     let dir = dir_or_found(dir)?;
-    let findings = check::check(&dir)?;
+    let mut findings = check::check(&dir)?;
+    if let Some(index_file) = &index_file {
+        // A marker error here is a tool error (`?`, exit 2), not a
+        // finding: `check::check_index` already draws that line.
+        if let Some(finding) = check::check_index(&dir, index_file)? {
+            findings.push(finding);
+        }
+    }
     for f in &findings {
         println!("{}: {}", f.path.display(), f.message);
     }
@@ -99,6 +106,30 @@ fn run_check(dir: Option<PathBuf>) -> Result<ExitCode> {
     } else {
         Ok(ExitCode::from(1))
     }
+}
+
+/// `caveat gen --index FILE`: splices a freshly rendered index into `FILE`
+/// between its markers, writing back only when that changes the text.
+fn run_gen(dir: Option<PathBuf>, index_file: PathBuf) -> Result<ExitCode> {
+    let dir = dir_or_found(dir)?;
+    let (entries, broken) = store::load(&dir)?;
+    for (path, error) in &broken {
+        eprintln!("caveat: {}: {error:#}", path.display());
+    }
+    let text = std::fs::read_to_string(&index_file)
+        .with_context(|| format!("reading {}", index_file.display()))?;
+    let block = index::render(&entries, &index_file);
+    let spliced = index::splice(&text, &block)?;
+    if spliced != text {
+        std::fs::write(&index_file, &spliced)
+            .with_context(|| format!("writing {}", index_file.display()))?;
+    }
+    println!(
+        "caveat: index in {}: {} entries",
+        index_file.display(),
+        entries.len()
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_search(dir: Option<PathBuf>, query: &str) -> Result<ExitCode> {
@@ -144,6 +175,15 @@ fn main() -> ExitCode {
         dir = Some(PathBuf::from(args.remove(at + 1)));
         args.remove(at);
     }
+    let mut index_file = None;
+    if let Some(at) = args.iter().position(|a| a == "--index") {
+        if at + 1 >= args.len() {
+            eprintln!("{USAGE}");
+            return ExitCode::from(2);
+        }
+        index_file = Some(PathBuf::from(args.remove(at + 1)));
+        args.remove(at);
+    }
     let words: Vec<&str> = args.iter().map(String::as_str).collect();
     let result = match words.as_slice() {
         ["hook", "claude"] => {
@@ -152,7 +192,14 @@ fn main() -> ExitCode {
             }
             return ExitCode::SUCCESS;
         }
-        ["check"] => run_check(dir),
+        ["check"] => run_check(dir, index_file),
+        ["gen"] => match index_file {
+            Some(index_file) => run_gen(dir, index_file),
+            None => {
+                eprintln!("{USAGE}");
+                return ExitCode::from(2);
+            }
+        },
         ["search", query @ ..] if !query.is_empty() => run_search(dir, &query.join(" ")),
         _ => {
             eprintln!("{USAGE}");

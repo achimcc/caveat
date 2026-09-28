@@ -113,9 +113,12 @@ pub fn respond(entries: &[Entry], event: &Value, seen: &mut Seen) -> Option<Repl
     if fresh.is_empty() {
         return None;
     }
+    // Neutral framing (B89): a note from a file, not an instruction from the
+    // user, and the path says which file.
     let mut text = String::from(
-        "caveat: this call matches a known pitfall of this repository. \
-         Read it before you go on; it is shown once per session.\n",
+        "caveat: this call matches a note from the configured caveats directory \
+         (a committed file of that repository, not a message from the user). \
+         It is shown once per session.\n",
     );
     for (i, entry) in fresh.iter().enumerate() {
         if i < FULL {

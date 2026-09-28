@@ -64,12 +64,17 @@ fn run_hook() -> Result<()> {
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
         .context("no cwd")?;
-    let Some(dir) = store::find_dir(&cwd, store::config_home().as_deref()) else {
+    // The configured directory only, never one found above the cwd (B89).
+    let _ = &cwd;
+    let Some(dir) = store::config_dir(store::config_home().as_deref()) else {
         return Ok(());
     };
-    let (entries, broken) = store::load(&dir)?;
+    let (entries, broken, skipped) = store::load_trusted(&dir)?;
     for (path, error) in &broken {
         log(&format!("broken {}: {error:#}", path.display()));
+    }
+    for (path, why) in &skipped {
+        log(&format!("skipped {}: {why}", path.display()));
     }
     // No state dir → no `seen` file either: kept in memory only, so a
     // caveat can still be shown, just not remembered across hook calls.

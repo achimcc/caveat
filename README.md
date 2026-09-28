@@ -170,15 +170,20 @@ In `~/.claude/settings.json`, under all three events:
 
 `PreToolUse` matches `command` triggers against the command about to run;
 `PostToolUse` and `PostToolUseFailure` match `output` triggers against what
-it printed. Without a `caveats` directory upwards from the event's `cwd`
-(and no fallback `dir = "…"` in `$XDG_CONFIG_HOME/caveat/config.toml`), the
-hook does nothing.
+it printed. The hook reads ONLY the directory named in
+`$XDG_CONFIG_HOME/caveat/config.toml` (`dir = "…"`); without one it does
+nothing. The commands (`check`, `gen`, `search`) still look upwards from the
+current directory — a person typing them means that checkout.
 
-**The trust model in one sentence:** a `caveats/` directory found above the
-`cwd` is trusted the way a `CLAUDE.md` found there is — its text (the body
-of a matching caveat) goes straight to the model as context, unreviewed at
-that point, the same as any other file in the repository that ends up read
-by an agent working in it.
+**The trust model (since 0.4.0):** the hook's text goes straight to the model
+as context, so it only comes from a directory you named, and only from files
+that are committed in its git work tree (a changed or untracked caveat waits
+for its commit), owned by the directory's owner and not writable by group or
+others. Skipped files are logged with the reason. The reply frames the text as
+a note from a repository file, not as a message from the user. Until 0.3.0 the
+hook took the first `caveats/` above the session's `cwd` — any foreign
+checkout or a `/tmp/caveats` could put text into the context framed as this
+repository's lesson (homeserver audit 3, B89).
 
 ## What it does not do
 

@@ -21,6 +21,8 @@
           version = (nixpkgs.lib.importTOML ./Cargo.toml).package.version;
           src = self;
           cargoLock.lockFile = ./Cargo.lock;
+          # The hook skips uncommitted caveats (git status); its test needs git.
+          nativeCheckInputs = [ pkgs.git ];
           meta = {
             description = "Shows a repository's known pitfall at the moment its error message appears: a Claude Code hook over a directory of caveats";
             homepage = "https://github.com/achimcc/caveat";

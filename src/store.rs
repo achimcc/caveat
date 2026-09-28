@@ -16,9 +16,9 @@ struct Config {
     dir: PathBuf,
 }
 
-/// Upwards from `cwd`, like lotse looks for its `lotse.toml`: a worktree brings
-/// its own version. The config is the fallback for repositories without any —
-/// `None` when there is no config home to look in (`config_home` gave none).
+/// For the COMMANDS (`check`, `gen`, `search`): upwards from `cwd`, like lotse
+/// looks for its `lotse.toml`, then the config. A person typing `caveat check`
+/// in a checkout means that checkout.
 pub fn find_dir(cwd: &Path, config_home: Option<&Path>) -> Option<PathBuf> {
     for dir in cwd.ancestors() {
         let candidate = dir.join(DIR);
@@ -26,9 +26,94 @@ pub fn find_dir(cwd: &Path, config_home: Option<&Path>) -> Option<PathBuf> {
             return Some(candidate);
         }
     }
+    config_dir(config_home)
+}
+
+/// For the HOOK: the configured directory and nothing else (homeserver audit
+/// 3, B89). Searching upwards from the session's cwd made any `caveats/` in a
+/// parent directory — a foreign checkout, `/tmp/caveats` — a channel into the
+/// model's context, framed as this repository's lesson.
+pub fn config_dir(config_home: Option<&Path>) -> Option<PathBuf> {
     let raw = std::fs::read_to_string(config_home?.join("caveat/config.toml")).ok()?;
     let config: Config = toml::from_str(&raw).ok()?;
     config.dir.is_dir().then_some(config.dir)
+}
+
+/// What the hook may show: the entries of `load`, minus every file that is
+/// (a) not owned by the directory's owner, (b) writable by group or others,
+/// or (c) changed or untracked in its git work tree — what counts is the
+/// committed (signed) state, not whatever lies in the work tree right now.
+/// Returns the skipped paths with the reason, for the log.
+#[allow(clippy::type_complexity)]
+pub fn load_trusted(
+    dir: &Path,
+) -> Result<(
+    Vec<Entry>,
+    Vec<(PathBuf, anyhow::Error)>,
+    Vec<(PathBuf, &'static str)>,
+)> {
+    use std::os::unix::fs::MetadataExt;
+    let (entries, broken) = load(dir)?;
+    let owner = std::fs::metadata(dir)?.uid();
+    let dirty = dirty_files(dir);
+    let mut keep = Vec::new();
+    let mut skipped = Vec::new();
+    for e in entries {
+        let abs = if e.path.is_absolute() {
+            e.path.clone()
+        } else {
+            dir.join(e.path.file_name().unwrap_or_default())
+        };
+        let canon = abs.canonicalize().unwrap_or(abs.clone());
+        let why = match std::fs::metadata(&canon) {
+            Err(_) => Some("unreadable"),
+            Ok(m) if m.uid() != owner => Some("not owned by the directory's owner"),
+            Ok(m) if m.mode() & 0o022 != 0 => Some("writable by group or others"),
+            Ok(_) if dirty.as_ref().is_some_and(|d| d.contains(&canon)) => {
+                Some("changed or untracked in the work tree")
+            }
+            Ok(_) => None,
+        };
+        match why {
+            Some(w) => skipped.push((abs, w)),
+            None => keep.push(e),
+        }
+    }
+    Ok((keep, broken, skipped))
+}
+
+/// Changed and untracked files under `dir`, as canonical paths; `None` when
+/// `dir` is not in a git work tree (then only owner and mode count).
+fn dirty_files(dir: &Path) -> Option<std::collections::HashSet<PathBuf>> {
+    let top = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let top = PathBuf::from(String::from_utf8_lossy(&top.stdout).trim());
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+            ".",
+        ])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())?;
+    let mut set = std::collections::HashSet::new();
+    for rec in out.stdout.split(|b| *b == 0).filter(|r| r.len() > 3) {
+        let rel = String::from_utf8_lossy(&rec[3..]).into_owned();
+        let p = top.join(rel);
+        set.insert(p.canonicalize().unwrap_or(p));
+    }
+    Some(set)
 }
 
 /// Every `*.md` of the directory, sorted by name. A file that does not parse
@@ -142,6 +227,67 @@ mod tests {
             find_dir(&tmp.path().join("other"), Some(&tmp.path().join("cfg"))),
             None
         );
+    }
+
+    /// B89: for the hook only the configured directory counts; a `caveats/`
+    /// in a directory above the session's cwd is none of its business.
+    #[test]
+    fn the_hook_ignores_a_caveats_dir_above_the_cwd() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path().join("fremd/caveats")).unwrap();
+        assert_eq!(config_dir(Some(&tmp.path().join("cfg"))), None);
+        let data = tmp.path().join("eigen/caveats");
+        fs::create_dir_all(&data).unwrap();
+        fs::create_dir_all(tmp.path().join("cfg/caveat")).unwrap();
+        fs::write(
+            tmp.path().join("cfg/caveat/config.toml"),
+            format!("dir = \"{}\"\n", data.display()),
+        )
+        .unwrap();
+        assert_eq!(config_dir(Some(&tmp.path().join("cfg"))), Some(data));
+    }
+
+    /// B89: a file others may write, and a file that is not committed, are
+    /// not shown by the hook.
+    #[test]
+    fn untrusted_and_uncommitted_files_are_skipped() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let dir = repo.join("caveats");
+        fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args([
+                    "-c",
+                    "user.name=t",
+                    "-c",
+                    "user.email=t@t",
+                    "-c",
+                    "commit.gpgsign=false",
+                ])
+                .args(args)
+                .output()
+                .unwrap()
+                .status
+                .success();
+            assert!(ok, "git {args:?}");
+        };
+        git(&["init", "-q"]);
+        fs::write(dir.join("a.md"), GOOD).unwrap();
+        fs::write(dir.join("b.md"), GOOD).unwrap();
+        fs::set_permissions(dir.join("a.md"), fs::Permissions::from_mode(0o644)).unwrap();
+        fs::set_permissions(dir.join("b.md"), fs::Permissions::from_mode(0o664)).unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-q", "-m", "x"]);
+        fs::write(dir.join("c.md"), GOOD).unwrap();
+        fs::set_permissions(dir.join("c.md"), fs::Permissions::from_mode(0o644)).unwrap();
+        let (entries, _, skipped) = load_trusted(&dir).unwrap();
+        let slugs: Vec<&str> = entries.iter().map(|e| e.slug.as_str()).collect();
+        assert_eq!(slugs, ["a"], "{skipped:?}");
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
     }
 
     #[test]

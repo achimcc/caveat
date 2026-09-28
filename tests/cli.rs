@@ -28,7 +28,31 @@ fn repo() -> tempfile::TempDir {
     std::fs::create_dir_all(tmp.path().join("repo/caveats")).unwrap();
     std::fs::write(tmp.path().join("repo/caveats/probe.md"), CAVEAT).unwrap();
     std::fs::write(tmp.path().join("repo/caveats/harmless.txt"), "git status\n").unwrap();
+    // The hook reads the CONFIGURED directory only (B89).
+    std::fs::create_dir_all(tmp.path().join("config/caveat")).unwrap();
+    std::fs::write(
+        tmp.path().join("config/caveat/config.toml"),
+        format!("dir = \"{}\"\n", tmp.path().join("repo/caveats").display()),
+    )
+    .unwrap();
     tmp
+}
+
+/// B89 (homeserver audit 3): a `caveats/` above the session's cwd that the
+/// config does not name is never read — nothing reaches the context.
+#[test]
+fn a_foreign_caveats_dir_above_the_cwd_reaches_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(tmp.path().join("repo/caveats")).unwrap();
+    std::fs::write(tmp.path().join("repo/caveats/probe.md"), CAVEAT).unwrap();
+    let (state, config) = (tmp.path().join("state"), tmp.path().join("config"));
+    let out = run(&["hook", "claude"], &recorded(tmp.path()), &state, &config);
+    assert!(out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stdout)
+    );
 }
 
 /// The recorded event, with its cwd pointed at the test repository and,

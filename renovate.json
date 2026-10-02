@@ -1,0 +1,48 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests"
+  ],
+  "description": [
+    "Keeps Cargo.lock, flake.lock and the pinned actions current. One PR per",
+    "run, never auto-merged."
+  ],
+  "dependencyDashboard": true,
+  "automerge": false,
+  "rebaseWhen": "conflicted",
+  "commitMessagePrefix": "chore(deps):",
+  "packageRules": [
+    {
+      "description": "One PR, not one per dependency.",
+      "matchPackageNames": [
+        "*"
+      ],
+      "groupName": "dependencies"
+    },
+    {
+      "description": "A few days' grace before a fresh release lands here, except for security fixes below.",
+      "matchPackageNames": [
+        "*"
+      ],
+      "minimumReleaseAge": "3 days"
+    }
+  ],
+  "nix": {
+    "description": [
+      "The Nix manager is beta and has to be turned on explicitly, or",
+      "Renovate never looks at flake.nix/flake.lock at all. It also refreshes",
+      "the advisory-db input the `audit` check reads."
+    ],
+    "enabled": true
+  },
+  "lockFileMaintenance": {
+    "description": "Refreshes both Cargo.lock and flake.lock even when no manifest range has changed.",
+    "enabled": true
+  },
+  "vulnerabilityAlerts": {
+    "description": "Security advisories skip the release-age grace period; everything else about review and auto-merge still applies.",
+    "enabled": true,
+    "minimumReleaseAge": "0 days"
+  }
+}

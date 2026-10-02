@@ -18,5 +18,9 @@ serde_yaml_ng = "0.10"
 tempfile = "3"
 toml = "0.8"
 
+[lints.rust]
+# No `unsafe` anywhere in this crate, and no `#[allow]` can bring it back.
+unsafe_code = "forbid"
+
 [profile.release]
 lto = true
